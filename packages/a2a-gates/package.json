@@ -2,13 +2,23 @@
   "name": "@synara/a2a-gates",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "license": "MIT",
-  "exports": { ".": "./src/core.ts" },
+  "type": "module",
+  "exports": {
+    ".": "./src/core.ts"
+  },
   "scripts": {
     "typecheck": "node ../../node_modules/@typescript/native/bin/tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },
-  "dependencies": { "@synara/contracts": "workspace:*", "@synara/shared": "workspace:*", "effect": "catalog:" },
-  "devDependencies": { "@types/node": "catalog:", "typescript": "catalog:", "vitest": "catalog:" }
+  "dependencies": {
+    "@synara/contracts": "workspace:*",
+    "@synara/shared": "workspace:*",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
 }
