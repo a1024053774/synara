@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Run this fork with an external cache and an isolated Synara identity."""
+import hashlib
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import sys
+
+
+def fail(message):
+    print(f"a2a synara: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+repo = Path(__file__).resolve().parents[2]
+volume = Path(os.environ.get("SYNARA_BUILD_VOLUME", "/Volumes/WD-Elements")).resolve()
+if not volume.is_mount():
+    fail(f"external volume is not mounted: {volume}")
+if volume.stat().st_dev == repo.stat().st_dev:
+    fail(f"external volume is on the repository filesystem: {volume}")
+if platform.system() != "Darwin" or platform.machine() != "arm64":
+    fail("this entry requires macOS arm64")
+
+slot = os.environ.get("A2A_SYNARA_SLOT", "default")
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", slot):
+    fail("A2A_SYNARA_SLOT must be one directory name beginning with a letter or digit")
+
+cache = volume / "dev-cache/synara"
+toolchains = cache / "toolchains"
+node_name = "node-v24.13.1-darwin-arm64"
+node = toolchains / node_name / "bin/node"
+runtime = cache / "instances" / slot
+paths = {
+    "BUN_INSTALL_CACHE_DIR": cache / "bun",
+    "electron_config_cache": cache / "electron",
+    "ELECTRON_CACHE": cache / "electron",
+    "ELECTRON_BUILDER_CACHE": cache / "electron-builder",
+    "npm_config_cache": cache / "npm",
+    "npm_config_devdir": cache / "node-gyp",
+    "TMPDIR": cache / "tmp" / slot,
+    "TURBO_CACHE_DIR": cache / "turbo" / slot,
+    "CLANG_MODULE_CACHE_PATH": cache / "clang" / slot,
+    "SWIFT_MODULECACHE_PATH": cache / "swift" / slot,
+    "SYNARA_HOME": runtime / "home",
+    "SYNARA_DESKTOP_SMOKE_USER_DATA": runtime / "electron-profile",
+}
+for path in [toolchains, node, *paths.values()]:
+    if not path.resolve().is_relative_to(volume):
+        fail(f"managed path escapes the external volume: {path}")
+
+args = sys.argv[1:]
+if args == ["setup-node"]:
+    if node.exists():
+        fail(f"Node already exists; refusing to replace it: {node}")
+    toolchains.mkdir(parents=True, exist_ok=True)
+    archive = toolchains / f"{node_name}.tar.gz"
+    sums = toolchains / "node-v24.13.1-SHASUMS256.txt"
+    for path in (archive, sums):
+        if not path.resolve().is_relative_to(volume):
+            fail(f"Node download path escapes the external volume: {path}")
+    if archive.exists() or sums.exists():
+        fail("Node download files already exist; inspect them before trying again")
+    base = "https://nodejs.org/dist/v24.13.1"
+    subprocess.run(["curl", "-fL", f"{base}/SHASUMS256.txt", "-o", str(sums)], check=True)
+    subprocess.run(["curl", "-fL", f"{base}/{archive.name}", "-o", str(archive)], check=True)
+    expected = [line.split()[0] for line in sums.read_text(encoding="utf-8").splitlines()
+                if line.split()[-1] == archive.name]
+    if len(expected) != 1:
+        fail("official SHASUMS256 must contain exactly one matching Node archive")
+    digest = hashlib.sha256()
+    with archive.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    if digest.hexdigest() != expected[0]:
+        fail("Node archive does not match the official SHASUMS256")
+    print(f"a2a synara: official SHA256 verified: {expected[0]}", flush=True)
+    subprocess.run(["tar", "-xzf", str(archive), "-C", str(toolchains)], check=True)
+    subprocess.run([str(node), "--version"], check=True)
+    raise SystemExit(0)
+
+if not args:
+    fail("usage: a2a/scripts/bun setup-node | <bun arguments>")
+if not node.is_file():
+    fail("Node 24.13.1 is missing; run a2a/scripts/bun setup-node")
+version = subprocess.check_output([str(node), "--version"], text=True).strip()
+if version != "v24.13.1":
+    fail(f"expected Node v24.13.1, got {version}")
+env = os.environ.copy()
+env.update({name: str(path) for name, path in paths.items()})
+env.update({
+    "PATH": str(node.parent) + os.pathsep + env.get("PATH", ""),
+    # Upstream turbo.json does not allow all cache/profile variables in strict mode.
+    "TURBO_ENV_MODE": "loose",
+    "SYNARA_DESKTOP_FLAVOR": "cua",
+    "SYNARA_DISABLE_AUTO_UPDATE": "1",
+    "SYNARA_NO_BROWSER": "true",
+    "SYNARA_AUTO_BOOTSTRAP_PROJECT_FROM_CWD": "false",
+    "SYNARA_HOST": "127.0.0.1",
+})
+for name in ("SYNARA_BETA_HOME", "SYNARA_DESKTOP_WS_URL", "SYNARA_AUTH_TOKEN",
+             "SYNARA_PUBLIC_URL", "SYNARA_ALLOW_INSECURE_REMOTE", "VITE_DEV_SERVER_URL",
+             "VITE_WS_URL", "SYNARA_MODE", "SYNARA_STATIC_DIR", "SYNARA_PORT", "PORT",
+             "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE", "ELECTRON_OVERRIDE_DIST_PATH"):
+    env.pop(name, None)
+for path in set(paths.values()):
+    path.mkdir(parents=True, exist_ok=True)
+print(f"a2a synara: node={node} cache={cache} instance={runtime}", file=sys.stderr, flush=True)
+os.chdir(repo)
+os.execvpe("bun", ["bun", *args], env)
