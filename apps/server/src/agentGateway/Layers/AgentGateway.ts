@@ -166,6 +166,7 @@ export const makeAgentGateway = Effect.gen(function* () {
   const providerRuntimeEvents = yield* ProviderRuntimeEventRepository;
   const diagnostics = yield* ThreadDiagnosticsQuery;
   const serverConfig = yield* ServerConfig;
+  const a2aGates = Option.getOrUndefined(yield* Effect.serviceOption(A2AGateService));
   const browserAutomationHost = Option.getOrElse(
     yield* Effect.serviceOption(BrowserAutomationHost),
     () => makeBrowserAutomationHost({}),
@@ -1537,6 +1538,7 @@ export const makeAgentGateway = Effect.gen(function* () {
   });
 
   const tools: ReadonlyArray<ToolEntry> = [
+    ...(a2aGates ? [a2aSubmitTool(a2aGates)] : []),
     ...readTools,
     ...diagnosticTools,
     createThreads,
@@ -1603,3 +1605,5 @@ export const makeAgentGateway = Effect.gen(function* () {
 });
 
 export const AgentGatewayLive = Layer.effect(AgentGateway, makeAgentGateway);
+import { A2AGateService } from "../../a2a/service";
+import { a2aSubmitTool } from "../../a2a/tools";

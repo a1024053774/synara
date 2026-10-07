@@ -92,6 +92,7 @@
         "@effect/sql-sqlite-bun": "catalog:",
         "@opencode-ai/sdk": "1.18.31",
         "@pierre/diffs": "^1.2.12",
+        "@synara/a2a-gates": "workspace:*",
         "@xterm/headless": "^6.0.0",
         "effect": "catalog:",
         "node-pty": "^1.1.0",
@@ -184,6 +185,20 @@
         "vite": "^8.1.4",
         "vitest": "catalog:",
         "vitest-browser-react": "^2.0.5",
+      },
+    },
+    "packages/a2a-gates": {
+      "name": "@synara/a2a-gates",
+      "version": "0.1.0",
+      "dependencies": {
+        "@synara/contracts": "workspace:*",
+        "@synara/shared": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
       },
     },
     "packages/contracts": {
@@ -1275,6 +1290,8 @@
     "@standard-schema/spec": ["@standard-schema/spec@1.1.0", "", {}, "sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w=="],
 
     "@swc/helpers": ["@swc/helpers@0.5.15", "", { "dependencies": { "tslib": "^2.8.0" } }, "sha512-JQ5TuMi45Owi4/BIMAJBoSQoOJu12oOk/gADqlcUL9JEdHB8vyjUSsxqeNXnmXHjYKMi2WcYtezGEEhqUI/E2g=="],
+
+    "@synara/a2a-gates": ["@synara/a2a-gates@workspace:packages/a2a-gates"],
 
     "@synara/cli": ["@synara/cli@workspace:apps/server"],
 

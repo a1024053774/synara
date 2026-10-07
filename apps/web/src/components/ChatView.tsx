@@ -6374,6 +6374,7 @@ export default function ChatView({
           {...(onCloseThreadPane ? { onCloseThreadPane } : {})}
         />
       </ChatSurfaceHeader>
+      <GateStatus threadId={threadId} />
 
       {/* Floating find panel — a root-level overlay so it sits on top of the
           header and the docked Environment panel at the pane's top-right. */}
@@ -6907,3 +6908,4 @@ export default function ChatView({
     </ChatLinkActionsContext.Provider>
   );
 }
+import { GateStatus } from "../a2a/GateStatus";

@@ -220,6 +220,7 @@ export const createEffectServer = Effect.fn(function* (
     makeEffectHttpRouteLayer(readiness, shutdownController),
     websocketRpcRouteLayer,
     agentGatewayRouteLayer,
+    a2aGateRouteLayer,
     externalMcpRouteLayer,
   );
   const httpApp = yield* HttpRouter.toHttpEffect(routesLayer);
@@ -323,3 +324,4 @@ export const ServerLive = Layer.effect(
     } satisfies ServerShape;
   }),
 );
+import { a2aGateRouteLayer } from "./a2a/httpRoute";
