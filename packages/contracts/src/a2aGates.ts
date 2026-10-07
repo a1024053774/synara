@@ -1,7 +1,16 @@
 import { Schema } from "effect";
 
 export const A2AGateRequest = Schema.Struct({
-  command: Schema.Literals(["create", "dispatch", "submit", "verify", "integrate", "reclaim", "status", "events"]),
+  command: Schema.Literals([
+    "create",
+    "dispatch",
+    "submit",
+    "verify",
+    "integrate",
+    "reclaim",
+    "status",
+    "events",
+  ]),
   task: Schema.String,
   repo: Schema.optional(Schema.String),
   project: Schema.optional(Schema.String),
@@ -13,6 +22,7 @@ export const A2AGateRequest = Schema.Struct({
   fence: Schema.optional(Schema.Number),
   spec_rev: Schema.optional(Schema.Number),
   commit: Schema.optional(Schema.String),
+  runtimeMode: Schema.optional(Schema.Literals(["approval-required", "full-access"])),
 });
 export type A2AGateRequest = typeof A2AGateRequest.Type;
 
@@ -23,6 +33,7 @@ export interface A2AAttempt {
   fence: number;
   spec_rev: number;
   thread_id: string;
+  runtime_mode: "approval-required" | "full-access";
   turn_id: string | null;
   workspace: string;
   base_commit: string;
@@ -55,7 +66,13 @@ export interface A2ATask {
   current_attempt: A2AAttempt | null;
   candidate_commit: string | null;
   verification: A2AVerification | null;
-  integration_intent: { G: string; M: string; verification_id: string; attempt: A2AAttempt; state: "pending" | "completed" } | null;
+  integration_intent: {
+    G: string;
+    M: string;
+    verification_id: string;
+    attempt: A2AAttempt;
+    state: "pending" | "completed";
+  } | null;
 }
 
 export interface A2AGateResult {
