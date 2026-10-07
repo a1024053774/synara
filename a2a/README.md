@@ -13,15 +13,15 @@ A2A_SYNARA_SLOT=t034 ./a2a/scripts/bun run start:desktop
 
 `setup-node` 从 [Node 官方 24.13.1 发布目录](https://nodejs.org/dist/v24.13.1/) 下载 macOS arm64 包，按该目录 `SHASUMS256.txt` 校验后解压到 `toolchains/`。它拒绝覆盖已有工具链和下载文件；失败文件保留供检查。后续调用验证 Node v24.13.1，只在子进程的 PATH 前置该工具链，不安装 mise，也不修改全局 Node 或 shell 配置。本机使用 Bun 1.4.2，与 `.mise.toml`、`packageManager` 一致。
 
-| 环境变量 | 缓存根目录下的相对路径 | 官方依据（核实于 2026-10-07） |
-| --- | --- | --- |
-| `BUN_INSTALL_CACHE_DIR` | `bun/` | [Bun 全局缓存](https://bun.sh/docs/pm/global-cache) |
-| `electron_config_cache`、`ELECTRON_CACHE` | `electron/` | [Electron 安装缓存](https://www.electronjs.org/docs/latest/tutorial/installation#cache)、[electron-builder 多平台构建](https://www.electron.build/docs/features/multi-platform-build/) |
-| `ELECTRON_BUILDER_CACHE` | `electron-builder/` | [electron-builder 环境变量](https://www.electron.build/docs/environment-variables/) |
-| `npm_config_cache`、`npm_config_devdir` | `npm/`、`node-gyp/` | npm/native 子进程缓存与 Node headers |
-| `TMPDIR` | `tmp/<slot>/` | 构建临时文件 |
-| `TURBO_CACHE_DIR` | `turbo/<slot>/` | Turbo 任务缓存 |
-| `CLANG_MODULE_CACHE_PATH`、`SWIFT_MODULECACHE_PATH` | `clang/<slot>/`、`swift/<slot>/` | 桌面 native helper 的编译缓存 |
+| 环境变量                                            | 缓存根目录下的相对路径           | 官方依据（核实于 2026-10-07）                                                                                                                                                          |
+| --------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BUN_INSTALL_CACHE_DIR`                             | `bun/`                           | [Bun 全局缓存](https://bun.sh/docs/pm/global-cache)                                                                                                                                    |
+| `electron_config_cache`、`ELECTRON_CACHE`           | `electron/`                      | [Electron 安装缓存](https://www.electronjs.org/docs/latest/tutorial/installation#cache)、[electron-builder 多平台构建](https://www.electron.build/docs/features/multi-platform-build/) |
+| `ELECTRON_BUILDER_CACHE`                            | `electron-builder/`              | [electron-builder 环境变量](https://www.electron.build/docs/environment-variables/)                                                                                                    |
+| `npm_config_cache`、`npm_config_devdir`             | `npm/`、`node-gyp/`              | npm/native 子进程缓存与 Node headers                                                                                                                                                   |
+| `TMPDIR`                                            | `tmp/<slot>/`                    | 构建临时文件                                                                                                                                                                           |
+| `TURBO_CACHE_DIR`                                   | `turbo/<slot>/`                  | Turbo 任务缓存                                                                                                                                                                         |
+| `CLANG_MODULE_CACHE_PATH`、`SWIFT_MODULECACHE_PATH` | `clang/<slot>/`、`swift/<slot>/` | 桌面 native helper 的编译缓存                                                                                                                                                          |
 
 上游 `turbo.json` 没有列出全部缓存与 profile 变量，因此入口设置 `TURBO_ENV_MODE=loose`，让真实子任务收到它们（[Turbo run 文档](https://turborepo.dev/docs/reference/run#--env-mode-option)）。workspace 的编译产物、类型检查缓存和 `.electron-runtime` 仍在 checkout；这里不迁移上游目录。
 
