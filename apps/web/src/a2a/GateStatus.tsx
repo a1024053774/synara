@@ -47,12 +47,17 @@ export function GateState({ task }: { task: A2ATask }) {
       {states.map((state) => (
         <Badge
           key={state}
+          aria-current={task.state === state ? "step" : undefined}
           variant={task.state === state ? (state === "accepted" ? "success" : "info") : "outline"}
         >
           {state}
         </Badge>
       ))}
-      {!states.includes(task.state) && <Badge variant="warning">{task.state}</Badge>}
+      {!states.includes(task.state) && (
+        <Badge variant="warning" aria-current="step">
+          {task.state}
+        </Badge>
+      )}
       {task.verification &&
         ["failed", "merge_failed", "unknown", "interrupted"].includes(task.verification.state) && (
           <details className="w-full text-destructive">

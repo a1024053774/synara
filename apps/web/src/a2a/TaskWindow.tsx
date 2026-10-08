@@ -86,7 +86,7 @@ function NewTask({
         </p>
       )}
       <div className="flex gap-2">
-        <Button size="sm" disabled={mutation.isPending || !title.trim()}>
+        <Button type="submit" size="sm" disabled={mutation.isPending || !title.trim()}>
           添加任务
         </Button>
         <Button

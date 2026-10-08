@@ -141,7 +141,7 @@ export function MembershipEditor({
         </p>
       )}
       <div className="flex gap-2">
-        <Button size="sm" disabled={mutation.isPending || !draft.title.trim()}>
+        <Button type="submit" size="sm" disabled={mutation.isPending || !draft.title.trim()}>
           保存归属
         </Button>
         <Button
