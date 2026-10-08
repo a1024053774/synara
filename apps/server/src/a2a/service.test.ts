@@ -6,17 +6,19 @@ import { join } from "node:path";
 import type { OrchestrationThreadShell, ProviderSession } from "@synara/contracts";
 import { Refusal } from "@synara/a2a-gates";
 import { Effect, Layer, ManagedRuntime, Option, Stream } from "effect";
-import { describe, it } from "vitest";
+import { describe, it, expect } from "vitest";
 import { ServerConfig } from "../config";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery";
 import { ProviderService } from "../provider/Services/ProviderService";
+import { ProviderRuntimeIngestionService } from "../orchestration/Services/ProviderRuntimeIngestion";
+import { ProviderCommandReactor } from "../orchestration/Services/ProviderCommandReactor";
 import { A2AGateService, A2AGateServiceLive } from "./service";
 import { readManagedThread } from "./orchestration";
 
 // Only the native shell/provider boundary is controlled. The service, sole gate
 // entry, operation locks, SQLite state, and fixture Git repository are real.
-async function fixture(mode: "lag" | "running" | "interrupted") {
+async function fixture(mode: "lag" | "running" | "interrupted", delayedStop = false) {
   const root = mkdtempSync(join(tmpdir(), "a2a-t039-service-"));
   const repo = join(root, "repo");
   mkdirSync(repo);
@@ -43,12 +45,25 @@ async function fixture(mode: "lag" | "running" | "interrupted") {
   let releaseLag: ReturnType<typeof setTimeout> | undefined;
   const effects: string[] = [];
   const commands: unknown[] = [];
+  const barriers: string[] = [];
+  let domainSequence = 0;
+  let projectionSequence = 0;
+  let completionPending = false;
+  let stopPending = false;
+  let archivePending = false;
+  let stalled = false;
+  let missingProjection = false;
+  let releasePrefix!: () => void;
+  const heldPrefix = new Promise<void>((resolve) => {
+    releasePrefix = resolve;
+  });
   const engine = {
     subscribeDomainEvents: Effect.succeed(Stream.never),
-    getEventHighWaterSequence: Effect.succeed(0),
+    getEventHighWaterSequence: Effect.sync(() => domainSequence),
     readEventsThrough: () => Stream.empty,
     dispatch: (command: Record<string, any>) =>
       Effect.sync(() => {
+        domainSequence++;
         commands.push(command);
         if (command.type === "thread.create") {
           shell = {
@@ -100,18 +115,33 @@ async function fixture(mode: "lag" | "running" | "interrupted") {
             };
           }
         } else if (command.type === "thread.session.stop") {
+          if (delayedStop) {
+            stopPending = true;
+            return { sequence: domainSequence };
+          }
           effects.push("project-stopped");
           shell = {
             ...shell,
             session: { ...shell.session!, status: "stopped", activeTurnId: null },
           };
         } else if (command.type === "thread.archive") {
+          if (delayedStop) {
+            archivePending = true;
+            return { sequence: domainSequence };
+          }
           effects.push("archive");
           shell = { ...shell, archivedAt: "2026-10-08T00:00:02.000Z" };
         }
+        projectionSequence = domainSequence;
+        return { sequence: domainSequence };
       }),
   };
   const query = {
+    getSnapshotSequence: () =>
+      Effect.sync(() => {
+        barriers.push("projection-sequence");
+        return { snapshotSequence: projectionSequence };
+      }),
     getProjectShellById: () => Effect.succeed(Option.none()),
     getThreadShellById: () => Effect.sync(() => Option.some(structuredClone(shell))),
   };
@@ -123,6 +153,44 @@ async function fixture(mode: "lag" | "running" | "interrupted") {
         sessions = [];
       }),
   };
+  const ingestion = {
+    drain: Effect.suspend(() =>
+      (stalled ? Effect.promise(() => heldPrefix) : Effect.void).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            barriers.push("runtime-prefix");
+            if (completionPending) {
+              shell = {
+                ...shell,
+                latestTurn: { ...shell.latestTurn!, state: "completed" },
+                session: { ...shell.session!, status: "ready", activeTurnId: null },
+              };
+              completionPending = false;
+              domainSequence++;
+            }
+            if (archivePending) {
+              effects.push("archive");
+              shell = { ...shell, archivedAt: "2026-10-08T00:00:02.000Z" };
+              archivePending = false;
+            }
+            if (!missingProjection) projectionSequence = domainSequence;
+          }),
+        ),
+      ),
+    ),
+  };
+  const reactor = {
+    drain: Effect.sync(() => {
+      barriers.push("provider-intent-ack");
+      if (stopPending) {
+        effects.push("project-stopped");
+        shell = { ...shell, session: { ...shell.session!, status: "stopped", activeTurnId: null } };
+        stopPending = false;
+        domainSequence++;
+        projectionSequence = domainSequence;
+      }
+    }),
+  };
   const runtime = ManagedRuntime.make(
     A2AGateServiceLive.pipe(
       Layer.provide(
@@ -131,6 +199,8 @@ async function fixture(mode: "lag" | "running" | "interrupted") {
           Layer.succeed(OrchestrationEngineService, engine as never),
           Layer.succeed(ProjectionSnapshotQuery, query as never),
           Layer.succeed(ProviderService, provider as never),
+          Layer.succeed(ProviderRuntimeIngestionService, ingestion as never),
+          Layer.succeed(ProviderCommandReactor, reactor as never),
         ),
       ),
     ),
@@ -154,6 +224,24 @@ async function fixture(mode: "lag" | "running" | "interrupted") {
     gates,
     effects,
     commands,
+    barriers,
+    completeBeforeProjection() {
+      sessions = [];
+      completionPending = true;
+    },
+    withholdProjection() {
+      missingProjection = true;
+      projectionSequence = 0;
+    },
+    stallUntilDeadline() {
+      stalled = true;
+      releaseLag = setTimeout(() => {
+        stalled = false;
+        sessions = [];
+        completionPending = true;
+        releasePrefix();
+      }, 1500);
+    },
     get shell() {
       return shell;
     },
@@ -181,6 +269,140 @@ async function fixture(mode: "lag" | "running" | "interrupted") {
 }
 
 describe("a2a native observation seam", () => {
+  it("refuses a snapshot below the captured domain fence without stopping the worker", async () => {
+    const f = await fixture("running");
+    try {
+      const dispatched = await f.gates.call({
+        command: "dispatch",
+        task: "controlled",
+        runtimeMode: "full-access",
+      });
+      assert.equal(dispatched.ok, true);
+      f.withholdProjection();
+      const result = await f.gates.call({
+        command: "reclaim",
+        task: "controlled",
+        attempt: dispatched.attempt!.attempt_id,
+      });
+      assert.equal(result.error, "run_external_unknown", JSON.stringify(result));
+      assert.deepEqual(f.effects, []);
+      assert.equal(gitRef(f.repo), f.base);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("keeps a stalled prefix within the original submit deadline", async () => {
+    const f = await fixture("running");
+    try {
+      const run = f.gates.call({
+        command: "run",
+        task: "controlled",
+        runtimeMode: "full-access",
+        wait_seconds: 1,
+      });
+      await expect
+        .poll(async () =>
+          (await f.gates.call({ command: "events", task: "controlled" })).events!.some(
+            (e) => e.type === "run_phase" && (e.details as any).phase === "waiting_submit",
+          ),
+        )
+        .toBe(true);
+      f.stallUntilDeadline();
+      const started = performance.now();
+      const result = await run;
+      assert.equal(result.error, "run_deadline", JSON.stringify(result));
+      assert.equal(result.run!.outcome, "deadline");
+      assert.ok(performance.now() - started < 3000);
+      assert.equal(existsSync(f.marker), false);
+      assert.equal(gitRef(f.repo), f.base);
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("completes the original run after native completion precedes its projection", async () => {
+    const f = await fixture("running");
+    try {
+      const run = f.gates.call({
+        command: "run",
+        task: "controlled",
+        runtimeMode: "full-access",
+        wait_seconds: 5,
+      });
+      await expect
+        .poll(async () =>
+          (await f.gates.call({ command: "events", task: "controlled" })).events!.some(
+            (e) => e.type === "run_phase" && (e.details as any).phase === "waiting_submit",
+          ),
+        )
+        .toBe(true);
+      const a = (await f.gates.call({ command: "status", task: "controlled" })).task!
+        .current_attempt!;
+      const submit = await f.gates.call(
+        {
+          command: "submit",
+          task: "controlled",
+          attempt: a.attempt_id,
+          session: a.session_id,
+          fence: a.fence,
+          spec_rev: a.spec_rev,
+          commit: f.base,
+        },
+        { thread: a.thread_id, turn: "literal-turn-a", assertActive: async () => {} },
+      );
+      assert.equal(submit.ok, true, JSON.stringify(submit));
+      await expect
+        .poll(
+          async () => (await f.gates.call({ command: "status", task: "controlled" })).task!.state,
+        )
+        .toBe("accepted");
+      f.completeBeforeProjection();
+      const result = await run;
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.run!.outcome, "completed");
+      assert.equal(result.task!.current_attempt!.attempt_id, a.attempt_id);
+      assert.equal(result.task!.current_attempt!.reclaimed, true);
+      assert.ok(f.barriers.includes("runtime-prefix"));
+      assert.ok(f.barriers.includes("projection-sequence"));
+    } finally {
+      await f.dispose();
+    }
+  });
+
+  it("confirms stop and archive projection after their intent acknowledgements", async () => {
+    const f = await fixture("running", true);
+    try {
+      const dispatched = await f.gates.call({
+        command: "dispatch",
+        task: "controlled",
+        runtimeMode: "full-access",
+      });
+      assert.equal(dispatched.ok, true);
+      f.shell = {
+        ...f.shell,
+        latestTurn: { ...f.shell.latestTurn!, state: "completed" },
+        session: { ...f.shell.session!, status: "ready", activeTurnId: null },
+      };
+      f.sessions = [];
+      const result = await f.gates.call({
+        command: "reclaim",
+        task: "controlled",
+        attempt: dispatched.attempt!.attempt_id,
+      });
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.deepEqual(f.effects, ["stop", "project-stopped", "archive"]);
+      assert.ok(f.barriers.includes("provider-intent-ack"));
+      const reclaimed = (
+        await f.gates.call({ command: "events", task: "controlled" })
+      ).events!.find((e) => e.type === "reclaimed")!;
+      assert.equal((reclaimed.details as any).archived.stopped, true);
+      assert.equal((reclaimed.details as any).archived.archived, true);
+    } finally {
+      await f.dispose();
+    }
+  });
+
   it("keeps an unprojected turn unbound and rejects delivery until projected", async () => {
     const f = await fixture("lag");
     try {

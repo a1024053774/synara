@@ -267,7 +267,15 @@ export function makeServerRuntimeServicesLayer(
     // resolves the service on every platform to make that decision.
     Layer.provideMerge(DeviceServiceLive),
     Layer.provideMerge(ComputerServiceLive),
-  ).pipe(Layer.provideMerge(A2AGateServiceLive.pipe(Layer.provide(runtimeServicesLayer))));
+  ).pipe(
+    Layer.provideMerge(
+      A2AGateServiceLive.pipe(
+        Layer.provide(runtimeServicesLayer),
+        Layer.provide(runtimeIngestionLayer),
+        Layer.provide(providerCommandReactorLayer),
+      ),
+    ),
+  );
   // The inbox owns the repository inventory, GitHub read queue, and snapshots; the pull request
   // service shares them so detail reads and mutations stay consistent with the list.
   const githubInboxServiceLayer = GitHubInboxServiceLive.pipe(
