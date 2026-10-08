@@ -151,7 +151,7 @@ export class A2AGates {
             "INSERT INTO verifications(id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
           )
           .run(task.verification.verification_id, JSON.stringify(task.verification));
-      this.event(task.task_id, type, details);
+      this.event(task.task_id, type, details, historicalAttempt?.attempt_id);
       this.db.exec("COMMIT");
     } finally {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
@@ -468,6 +468,7 @@ export class A2AGates {
         this.event(taskId, "dispatched", { attempt });
         return { ok: true, task };
       }
+      let historicalAttempt: A2AAttempt | undefined;
       if (
         args.command === "reclaim" &&
         args.attempt &&
@@ -476,10 +477,11 @@ export class A2AGates {
         const row = this.db.prepare("SELECT data FROM attempts WHERE id=?").get(id(args.attempt));
         requireGate(row, "unknown_attempt");
         const previous = JSON.parse(String(row.data)) as A2AAttempt;
-        requireGate(previous.task_id === taskId && previous.reclaimed, "stale_attempt");
-        return { ok: true, task };
+        requireGate(previous.task_id === taskId, "stale_attempt");
+        if (previous.reclaimed) return { ok: true, task };
+        historicalAttempt = previous;
       }
-      if (args.attempt)
+      if (args.attempt && !historicalAttempt)
         requireGate(task.current_attempt?.attempt_id === args.attempt, "stale_attempt");
       if (args.command === "verify")
         requireGate(task.state === "submitted" || task.state === "verifying", "not_submitted");
@@ -488,7 +490,7 @@ export class A2AGates {
           task.state === "verified" || task.state === "accepted" || task.integration_intent,
           "not_verified",
         );
-      const attempt = this.current(task, args.attempt);
+      const attempt = historicalAttempt ?? this.current(task, args.attempt);
       if (args.command === "submit") {
         requireGate(args.attempt === attempt.attempt_id, "stale_attempt");
         requireGate(args.session === attempt.session_id, "stale_session");
@@ -716,17 +718,13 @@ export class A2AGates {
         return { ok: true, task };
       }
       requireGate(args.command === "reclaim", "invalid_command");
+      const ownsTask = task.current_attempt?.attempt_id === attempt.attempt_id;
       if (attempt.reclaimed) {
-        if (task.state !== "accepted") {
-          task.current_attempt = null;
-          task.state = "ready";
-          this.save(task, "ready_after_reclaim", { attempt: attempt.attempt_id });
-        }
+        if (ownsTask && task.state !== "accepted") this.invalidate(task, "controller reclaim");
         return { ok: true, task };
       }
       requireGate(
-        ["accepted", "claimed", "submitted"].includes(task.state) &&
-          !task.integration_intent?.state.includes("pending"),
+        !ownsTask || !task.integration_intent || task.integration_intent.state === "completed",
         "needs_reconciliation",
       );
       requireGate(this.runtime && attempt.thread_id, "no_bound_thread");
@@ -736,11 +734,8 @@ export class A2AGates {
         "identity_conflict",
       );
       requireGate(!live.running, "worker_working");
-      this.event(taskId, "reclaim_intent", { attempt, live });
-      if (task.state !== "accepted") {
-        task.state = "revoked";
-        this.save(task, "revoked");
-      }
+      this.event(taskId, "reclaim_intent", { attempt, live }, attempt.attempt_id);
+      if (ownsTask && task.state !== "accepted") this.invalidate(task, "controller reclaim");
       await this.runtime.stopThread(attempt.thread_id);
       const stopped = await this.runtime.readThread(attempt.thread_id);
       requireGate(stopped.stopped, "stop_unconfirmed");
@@ -748,14 +743,7 @@ export class A2AGates {
       const archived = await this.runtime.readThread(attempt.thread_id);
       requireGate(archived.archived && archived.stopped, "reclaim_unconfirmed");
       attempt.reclaimed = true;
-      this.save(task, "reclaimed", { attempt, archived });
-      if (task.state !== "accepted") {
-        task.current_attempt = null;
-        task.state = "ready";
-        task.candidate_commit = null;
-        task.verification = null;
-        this.save(task, "ready_after_reclaim", { attempt: attempt.attempt_id });
-      }
+      this.save(task, "reclaimed", { attempt, archived }, attempt);
       return { ok: true, task };
     } catch (error) {
       const ioCode = (error as NodeJS.ErrnoException).code;
