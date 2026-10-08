@@ -53,3 +53,4 @@ export * from "./rpc";
 export * from "./claudeCache";
 export * from "./todo";
 export * from "./a2aGates";
+export * from "./a2aMembership";

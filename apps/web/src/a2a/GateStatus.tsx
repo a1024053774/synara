@@ -1,7 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import type { A2AGateResult } from "@synara/contracts";
+import type { A2AGateResult, A2ATask } from "@synara/contracts";
 import { Badge } from "../components/ui/badge";
 import { resolveWsHttpUrl } from "../lib/wsHttpUrl";
+import { humanObserverView } from "./humanObserver";
+import { HumanObserverStatus } from "./HumanObserverStatus";
 
 export function GateStatus({ threadId }: { threadId: string }) {
   const query = useQuery({
@@ -14,7 +16,7 @@ export function GateStatus({ threadId }: { threadId: string }) {
       if (!response.ok) throw new Error(`门禁状态读取失败 (${response.status})`);
       const result = (await response.json()) as A2AGateResult;
       if (!result.ok) throw new Error(result.error ?? "门禁状态未知");
-      return result.task ?? null;
+      return { task: result.task ?? null, observer: humanObserverView(result) };
     },
     refetchInterval: 1000,
   });
@@ -24,8 +26,17 @@ export function GateStatus({ threadId }: { threadId: string }) {
         {query.error.message}
       </p>
     );
-  const task = query.data;
+  const task = query.data?.task;
   if (!task) return null;
+  return (
+    <>
+      <GateState task={task} />
+      <HumanObserverStatus observer={query.data!.observer} />
+    </>
+  );
+}
+
+export function GateState({ task }: { task: A2ATask }) {
   const states = ["claimed", "submitted", "verified", "accepted"];
   return (
     <section
@@ -42,6 +53,17 @@ export function GateStatus({ threadId }: { threadId: string }) {
         </Badge>
       ))}
       {!states.includes(task.state) && <Badge variant="warning">{task.state}</Badge>}
+      {task.verification &&
+        ["failed", "merge_failed", "unknown", "interrupted"].includes(task.verification.state) && (
+          <details className="w-full text-destructive">
+            <summary className="cursor-pointer">失败原因 · {task.verification.state}</summary>
+            <pre className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-all font-mono text-ui-xs">
+              {task.verification.result?.stderr ||
+                task.verification.result?.stdout ||
+                "验收没有完整结果"}
+            </pre>
+          </details>
+        )}
       {task.current_attempt?.reclaimed && (
         <span className="text-muted-foreground">worker 已回收</span>
       )}
