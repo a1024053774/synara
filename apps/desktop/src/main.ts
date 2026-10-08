@@ -4624,6 +4624,26 @@ function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
     backendSessionClosed = true;
     writeBackendSessionBoundary("END", details);
   };
+  let workbenchEndpointPath: string | undefined;
+  if (process.env.A2A_WORKBENCH === "1" && child.pid) {
+    const directory = Path.join(BASE_DIR, "a2a-gates");
+    FS.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    workbenchEndpointPath = Path.join(directory, "endpoint.json");
+    const temporary = Path.join(directory, `endpoint.${process.pid}.tmp`);
+    FS.writeFileSync(
+      temporary,
+      `${JSON.stringify({
+        version: 1,
+        home: BASE_DIR,
+        origin: backendBaseUrl,
+        token: backendAuthToken,
+        desktopPid: process.pid,
+        backendPid: child.pid,
+      })}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    FS.renameSync(temporary, workbenchEndpointPath);
+  }
   writeBackendSessionBoundary(
     "START",
     `pid=${child.pid ?? "unknown"} port=${backendPort} cwd=${resolveBackendCwd()}`,
@@ -4685,6 +4705,7 @@ function startBackend(trigger: BackendStartTrigger = "lifecycle"): void {
   });
 
   child.on("exit", (code, signal) => {
+    if (workbenchEndpointPath) FS.unlinkSync(workbenchEndpointPath);
     startupHealthMonitor.abort();
     // Output can drain after a failed stop has restored the app's running state.
     const expectedExit = isQuitting;
@@ -6332,6 +6353,11 @@ app.on("window-all-closed", () => {
 });
 
 if (process.platform !== "win32") {
+  if (process.env.A2A_WORKBENCH === "1") {
+    // macOS routes SIGTERM through the interactive quit guard. The launcher's
+    // explicit stop uses this signal to enter the existing graceful shutdown.
+    process.on("SIGUSR2", () => requestGracefulAppQuit("workbench stop"));
+  }
   process.on("uncaughtException", (error: unknown) => {
     if (!isBrokenPipeError(error)) {
       throw error;
