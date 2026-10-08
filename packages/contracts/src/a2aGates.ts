@@ -119,10 +119,23 @@ export interface A2ARun {
   cleanup_failure?: unknown;
 }
 
+export interface A2AHumanInputObserver {
+  state: "starting" | "healthy" | "failed" | "stopped";
+  updated_at: string;
+  failure?: {
+    event_id?: string;
+    source_sequence?: number;
+    thread_id?: string;
+    message_id?: string;
+    reason: string;
+  };
+}
+
 export interface A2AGateResult {
   ok: boolean;
   task?: A2ATask;
   run?: A2ARun;
+  human_input_observer?: A2AHumanInputObserver;
   attempt?: A2AAttempt;
   verification?: A2AVerification;
   replayed?: boolean;

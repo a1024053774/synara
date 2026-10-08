@@ -47,7 +47,10 @@ const route = Effect.gen(function* () {
   const gates = yield* A2AGateService;
   if (request.method === "GET") {
     const task = gates.taskForThread(url.searchParams.get("thread") ?? "");
-    return HttpServerResponse.jsonUnsafe({ ok: true, task }, { headers });
+    return HttpServerResponse.jsonUnsafe(
+      { ok: true, task, human_input_observer: gates.humanInputObserverStatus() },
+      { headers },
+    );
   }
   const body = yield* readMcpJsonBody(request);
   if (body.kind !== "ok")

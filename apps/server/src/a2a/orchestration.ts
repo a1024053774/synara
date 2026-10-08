@@ -4,7 +4,7 @@ import type {
   OrchestrationThreadShell,
   ProviderSession,
 } from "@synara/contracts";
-import { Effect, Stream } from "effect";
+import { Cause, Effect, Exit, Option, Stream } from "effect";
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine";
 
 export function readManagedThread(
@@ -67,17 +67,42 @@ export const installHumanInputRecording = Effect.fn("a2a.installHumanInputRecord
 ) {
   // Attach before replay; the core deduplicates overlapping event IDs. Replay
   // also records messages committed while this service was not running.
+  gates.setHumanInputObserverStatus("starting");
   const events = yield* engine.subscribeDomainEvents;
   const highWater = yield* engine.getEventHighWaterSequence;
   const record = (event: OrchestrationEvent) =>
     Effect.try({
       try: () => recordHumanMessage(gates, event),
-      catch: (cause) => new Error(`a2a message recording failed for ${event.eventId}`, { cause }),
+      catch: (cause) => ({
+        event_id: event.eventId,
+        source_sequence: event.sequence,
+        ...(event.type === "thread.message-sent"
+          ? {
+              thread_id: event.payload.threadId,
+              message_id: event.payload.messageId,
+            }
+          : {}),
+        reason: String(cause),
+      }),
     });
   yield* Stream.runForEach(engine.readEventsThrough(0, highWater), record);
   yield* Effect.forkScoped(
     Stream.runForEach(events, record).pipe(
-      Effect.tapError((error) => Effect.logError("a2a human input observer failed", error)),
+      Effect.onExit((exit) => {
+        if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
+          return Effect.sync(() => gates.setHumanInputObserverStatus("stopped"));
+        }
+        const failure = Exit.isFailure(exit)
+          ? Option.getOrUndefined(Cause.findErrorOption(exit.cause))
+          : undefined;
+        const details = failure ?? {
+          reason: Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "Human input stream ended",
+        };
+        return Effect.sync(() => gates.setHumanInputObserverStatus("failed", details)).pipe(
+          Effect.andThen(Effect.logError("a2a human input observer failed", details)),
+        );
+      }),
     ),
   );
+  gates.setHumanInputObserverStatus("healthy");
 });

@@ -6,6 +6,7 @@ import {
   A2AGateRequest,
   type A2AAttempt,
   type A2ARun,
+  type A2AHumanInputObserver,
   type A2AGateResult,
   type A2AVerification,
   type A2ACommandResult,
@@ -70,6 +71,7 @@ export interface SubmitCaller {
 /** The sole mutation owner. Thread lifecycle signals never invoke this core. */
 export class A2AGates {
   private readonly db: DatabaseSync;
+  private humanInputObserver?: A2AHumanInputObserver;
   constructor(
     readonly root: string,
     private readonly runtime?: GateRuntime,
@@ -97,6 +99,32 @@ export class A2AGates {
   }
   close() {
     this.db.close();
+  }
+  humanInputObserverStatus(): A2AHumanInputObserver | undefined {
+    const status = this.humanInputObserver;
+    return status
+      ? { ...status, ...(status.failure ? { failure: { ...status.failure } } : {}) }
+      : undefined;
+  }
+  setHumanInputObserverStatus(
+    state: A2AHumanInputObserver["state"],
+    failure?: A2AHumanInputObserver["failure"],
+  ) {
+    // A failed recorder cannot reset itself. A new service instance must replay
+    // the durable Synara journal before reporting healthy again.
+    if (this.humanInputObserver?.state === "failed") return;
+    this.humanInputObserver = {
+      state,
+      updated_at: new Date().toISOString(),
+      ...(failure ? { failure } : {}),
+    };
+  }
+  private checkHumanInputObserver() {
+    requireGate(
+      this.humanInputObserver?.state !== "failed",
+      "human_input_observer_failed",
+      this.humanInputObserverStatus(),
+    );
   }
   taskForThread(thread: string): A2ATask | null {
     if (!thread) return null;
@@ -152,6 +180,7 @@ export class A2AGates {
     }
   }
   private event(task: string, type: string, details: unknown, expectedAttempt?: string) {
+    this.checkHumanInputObserver();
     const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(task);
     const current = row ? (JSON.parse(String(row.data)) as A2ATask).current_attempt : null;
     this.db
@@ -175,6 +204,7 @@ export class A2AGates {
     details: unknown = task,
     historicalAttempt?: A2AAttempt,
   ) {
+    this.checkHumanInputObserver();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
@@ -212,6 +242,7 @@ export class A2AGates {
     cwd: string,
     env?: NodeJS.ProcessEnv,
   ): Promise<A2ACommandResult> {
+    this.checkHumanInputObserver();
     const command = argv[0];
     requireGate(command, "invalid_command");
     this.event(task, "command_intent", { argv, cwd });
@@ -230,7 +261,12 @@ export class A2AGates {
             exit: code,
             returncode: code,
           };
-          this.event(task, "command_result", record);
+          try {
+            this.event(task, "command_result", record);
+          } catch (recordingError) {
+            reject(recordingError);
+            return;
+          }
           if (error && code === null) {
             const refusal = error.killed ? "command_timeout" : "command_unavailable";
             reject(new Refusal(refusal, { ...record, reason: error.message }));
@@ -347,6 +383,7 @@ export class A2AGates {
   }
 
   private saveRun(run: A2ARun, type: string) {
+    this.checkHumanInputObserver();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
@@ -370,6 +407,7 @@ export class A2AGates {
     );
   }
   private async observeRun(run: A2ARun) {
+    this.checkHumanInputObserver();
     const attempt = this.current(this.load(run.task_id), run.attempt_id!);
     let live: Awaited<ReturnType<GateRuntime["readThread"]>>;
     try {
@@ -547,6 +585,11 @@ export class A2AGates {
                 ? "integrated_reclaim_failed"
                 : "paused";
       run.ended = new Date().toISOString();
+      if (this.humanInputObserver?.state === "failed") {
+        // The write that failed may also prevent a final receipt. Keep the last
+        // durable phase and expose the pause; never invent persisted evidence.
+        return { ok: false, error: code, details, run };
+      }
       this.saveRun(run, "run_finished");
       return { ok: false, error: code, details, task: this.load(args.task), run };
     } finally {
@@ -555,7 +598,9 @@ export class A2AGates {
   }
 
   async call(raw: unknown, caller?: SubmitCaller): Promise<A2AGateResult> {
-    return this.request(raw, caller);
+    const result = await this.request(raw, caller);
+    const observer = this.humanInputObserverStatus();
+    return { ...result, ...(observer ? { human_input_observer: observer } : {}) };
   }
 
   private async request(raw: unknown, caller?: SubmitCaller, run?: A2ARun): Promise<A2AGateResult> {
@@ -566,7 +611,6 @@ export class A2AGates {
       taskId = id(args.task);
       if (args.attempt !== undefined) id(args.attempt);
       if (args.session !== undefined) id(args.session);
-      if (args.command === "run") return await this.run(args);
       if (args.command === "status") return { ok: true, task: this.load(taskId) };
       if (args.command === "events") {
         const rows = this.db
@@ -586,6 +630,8 @@ export class A2AGates {
           })),
         };
       }
+      this.checkHumanInputObserver();
+      if (args.command === "run") return await this.run(args);
       // A separate SQLite write transaction is the OS-released task operation lock.
       // Keep the inode, never unlink it. Main-state reads remain available during an oracle.
       lock = new DatabaseSync(join(this.root, "locks", `${taskId}.sqlite3`));
@@ -643,6 +689,7 @@ export class A2AGates {
         if (!actual)
           await this.git(taskId, repo, ["update-ref", REF, base, "0".repeat(base.length)]);
         requireGate((await this.integration(task)) === base, "integration_conflict");
+        this.checkHumanInputObserver();
         await this.runtime?.ensureProject(task.project_id, repo);
         task.state = "ready";
         this.save(task, "created");
@@ -719,6 +766,7 @@ export class A2AGates {
           throw new Refusal("worktree_failed");
         }
         if (args.command === "dispatch") {
+          this.checkHumanInputObserver();
           await this.runtime!.createThread(task, attempt);
           const live = await this.runtime!.readThread(attempt.thread_id);
           this.checkThread(attempt, live);
@@ -739,6 +787,7 @@ export class A2AGates {
         };
         const prompt = `${readFileSync(task.instructions, "utf8")}\n\nManaged attempt identity: ${JSON.stringify(submit)}\nAfter implementing and committing, explicitly call the a2a_submit MCP tool with this identity and your full commit SHA. Never submit passed=true. Only this tool delivers your work; turn completion does not. Do not modify the contract or any acceptance tool. If any unexpected approval is requested, stop and report it.`;
         this.event(taskId, "prompt_intent", { thread: attempt.thread_id, prompt });
+        this.checkHumanInputObserver();
         await this.runtime!.startThread(task, attempt, prompt);
         const live = await this.runtime!.readThread(attempt.thread_id);
         this.checkThread(attempt, live);
@@ -1017,10 +1066,12 @@ export class A2AGates {
       requireGate(!live.running, "worker_working");
       this.event(taskId, "reclaim_intent", { attempt, live }, attempt.attempt_id);
       if (ownsTask && task.state !== "accepted") this.invalidate(task, "controller reclaim");
+      this.checkHumanInputObserver();
       await this.runtime.stopThread(attempt.thread_id);
       const stopped = await this.runtime.readThread(attempt.thread_id);
       this.checkThread(attempt, stopped);
       requireGate(stopped.stopped, "stop_unconfirmed");
+      this.checkHumanInputObserver();
       await this.runtime.archiveThread(attempt.thread_id);
       const archived = await this.runtime.readThread(attempt.thread_id);
       this.checkThread(attempt, archived);
@@ -1044,7 +1095,9 @@ export class A2AGates {
             ? "local_io_failed"
             : "gate_failure";
       const details = error instanceof Refusal ? error.details : String(error);
-      if (taskId) this.event(taskId, "rejected", { error: code, details, input: raw });
+      // A failed observer must remain queryable even when SQLite cannot append.
+      if (taskId && this.humanInputObserver?.state !== "failed")
+        this.event(taskId, "rejected", { error: code, details, input: raw });
       return { ok: false, error: code, details };
     } finally {
       lock?.close();
