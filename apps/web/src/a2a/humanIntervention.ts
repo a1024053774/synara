@@ -3,6 +3,7 @@ import type { A2AGateResult } from "@synara/contracts";
 export interface HumanIntervention {
   eventId: string;
   threadId: string;
+  messageId: string;
   attemptId: string;
   time: string;
   text: string;
@@ -29,6 +30,8 @@ export function humanInterventions(
       !details.event_id ||
       typeof details.thread_id !== "string" ||
       !details.thread_id ||
+      typeof details.message_id !== "string" ||
+      !details.message_id ||
       typeof details.attempt_id !== "string" ||
       !details.attempt_id ||
       typeof details.text !== "string"
@@ -41,6 +44,7 @@ export function humanInterventions(
     result.push({
       eventId: details.event_id,
       threadId: details.thread_id,
+      messageId: details.message_id,
       attemptId: details.attempt_id,
       time: event.time,
       text: details.text,

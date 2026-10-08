@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "../components/ui/button";
 import { requestA2A } from "./api";
 
+/** Inline in the gate bar: only the one move the current state allows. */
 export function GateActions({ task, observerFailed }: { task: A2ATask; observerFailed: boolean }) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
@@ -18,11 +19,11 @@ export function GateActions({ task, observerFailed }: { task: A2ATask; observerF
     mutation.mutate({ command, task: task.task_id, attempt: attempt.attempt_id });
   };
   return (
-    <div className="flex flex-wrap items-center gap-2 px-4 py-2 text-ui-xs">
+    <>
       {task.state === "claimed" && <span className="text-muted-foreground">等待显式交付</span>}
       {task.state === "submitted" && (
         <Button
-          size="sm"
+          size="xs"
           variant="outline"
           disabled={!attempt || mutation.isPending || observerFailed}
           onClick={() => call("verify")}
@@ -32,7 +33,7 @@ export function GateActions({ task, observerFailed }: { task: A2ATask; observerF
       )}
       {task.state === "verified" && (
         <Button
-          size="sm"
+          size="xs"
           disabled={!attempt || mutation.isPending || observerFailed}
           onClick={() => call("integrate")}
         >
@@ -41,7 +42,7 @@ export function GateActions({ task, observerFailed }: { task: A2ATask; observerF
       )}
       {task.state === "accepted" && attempt && !attempt.reclaimed && (
         <Button
-          size="sm"
+          size="xs"
           variant="outline"
           disabled={mutation.isPending || observerFailed}
           onClick={() => call("reclaim")}
@@ -54,6 +55,6 @@ export function GateActions({ task, observerFailed }: { task: A2ATask; observerF
           {mutation.error.message}
         </span>
       )}
-    </div>
+    </>
   );
 }

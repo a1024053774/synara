@@ -1,34 +1,39 @@
-import { Badge } from "../components/ui/badge";
+import { StatusChip } from "../components/ui/status-chip";
 import type { HumanObserverView } from "./humanObserver";
 
-export function HumanObserverStatus({ observer }: { observer: HumanObserverView }) {
+const OBSERVER_LABEL: Record<HumanObserverView["state"], string> = {
+  missing: "未安装",
+  starting: "启动中",
+  healthy: "正常",
+  stopped: "已停止",
+  failed: "已失败",
+};
+
+/** Small status chip; the failure explanation lives in ObserverFailureNote. */
+export function ObserverIndicator({ observer }: { observer: HumanObserverView }) {
   return (
-    <section
-      aria-label="人工输入记录器状态"
-      className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2 text-ui-xs"
-    >
-      <Badge
-        variant={
+    <span aria-label="人工输入记录器状态" title={observer.updatedAt}>
+      <StatusChip
+        dotClassName={
           observer.state === "healthy"
-            ? "success"
+            ? "bg-status-success"
             : observer.state === "failed"
-              ? "error"
-              : "warning"
+              ? "bg-status-failure"
+              : "bg-warning"
         }
-        title={observer.updatedAt}
+        className="text-ui-xs text-muted-foreground"
       >
-        {observer.state === "missing"
-          ? "人工输入记录器：未安装"
-          : `人工输入记录器：${observer.state}`}
-      </Badge>
-      {observer.state === "failed" && (
-        <>
-          <span className="text-destructive">{observer.failureReason}</span>
-          <span className="text-destructive">
-            门禁会拒绝改变任务状态的操作（human_input_observer_failed）。
-          </span>
-        </>
-      )}
-    </section>
+        人工输入记录器 · {OBSERVER_LABEL[observer.state]}
+      </StatusChip>
+    </span>
+  );
+}
+
+export function ObserverFailureNote({ observer }: { observer: HumanObserverView }) {
+  return (
+    <p className="border-t border-border/60 bg-muted/30 px-4 py-1.5 text-muted-foreground">
+      记录器没有在记录人工输入：{observer.failureReason}。恢复前，门禁拒绝改变任务状态的操作{" "}
+      <code className="font-mono text-ui-2xs">human_input_observer_failed</code>。
+    </p>
   );
 }

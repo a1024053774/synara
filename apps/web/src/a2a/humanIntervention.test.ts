@@ -34,6 +34,7 @@ const reviewer = {
     attempt_id: "review-attempt-R",
     thread_id: "reviewer-R",
     event_id: "user-event-R",
+    message_id: "message-R",
     text: "只审查，不集成",
   },
 };
@@ -61,6 +62,7 @@ describe("human intervention protocol fixtures", () => {
       {
         eventId: "user-event-A",
         threadId: "worker-A",
+        messageId: "message-A",
         attemptId: "old-attempt-A",
         time: "2026-10-08T01:02:03Z",
         text: "检查分页边界",
@@ -68,6 +70,7 @@ describe("human intervention protocol fixtures", () => {
       {
         eventId: "user-event-R",
         threadId: "reviewer-R",
+        messageId: "message-R",
         attemptId: "review-attempt-R",
         time: "2026-10-08T01:03:04Z",
         text: "只审查，不集成",
@@ -82,6 +85,9 @@ describe("human intervention protocol fixtures", () => {
         [{ ...worker, details: { ...worker.details, thread_id: null } }],
         "task-A",
       ),
+    ).toThrow();
+    expect(() =>
+      humanInterventions([{ ...worker, details: { ...worker.details, message_id: "" } }], "task-A"),
     ).toThrow();
     const mismatched = { ...worker, attempt: "another-attempt" };
     expect(() => humanInterventions([mismatched], "task-A")).toThrow();

@@ -8,16 +8,17 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { isOrdinarySpaceProject } from "../lib/spaces";
+import { cn } from "../lib/utils";
 import { useStore } from "../store";
 import { createThreadShellsSelector } from "../storeSelectors";
 import { retainThreadDetailSubscription } from "../threadDetailSubscriptionRetention";
 import { useWorkspacePathsStore } from "../workspacePathsStore";
-import { GateState } from "./GateStatus";
+import { GateBar, GateShownByTaskWindow } from "./GateStatus";
 import { GateActions } from "./GateActions";
 import { MembershipEditor } from "./MembershipEditor";
 import { requestA2A } from "./api";
 import { useGateTask } from "./useGateTask";
-import { HumanObserverStatus } from "./HumanObserverStatus";
+import { InterventionMarks } from "./InterventionMarks";
 import type { Project } from "../types";
 
 const selectThreadShells = createThreadShellsSelector();
@@ -159,203 +160,209 @@ export function TaskWindow() {
   };
 
   return (
-    <main aria-label="任务窗口" className="flex min-h-0 min-w-0 flex-1 text-ui">
-      <nav
-        aria-label="项目与任务"
-        className="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto border-r border-border p-3"
-      >
-        <h1 className="font-medium">任务窗口</h1>
-        {query.error && (
-          <p role="alert" className="text-ui-xs text-destructive">
-            {query.error.message}
-          </p>
-        )}
-        {projects.map((project) => (
-          <section key={project.id}>
-            <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
-              <h2 className="truncate text-ui-sm font-medium" title={project.name}>
-                {project.name}
-              </h2>
-              <Button
-                size="xs"
-                variant="ghost"
-                aria-label={`为${project.name}添加任务`}
-                onClick={() => {
-                  setCreating(project);
-                  setEditing(false);
-                }}
-              >
-                ＋
-              </Button>
-            </div>
-            {query.data
-              ?.filter((task) => task.projectId === project.id)
-              .map((item) => (
+    <GateShownByTaskWindow.Provider value>
+      <main aria-label="任务窗口" className="flex min-h-0 min-w-0 flex-1 text-ui">
+        <nav
+          aria-label="项目与任务"
+          className="flex w-56 shrink-0 flex-col gap-3 overflow-y-auto border-r border-border p-3"
+        >
+          <h1 className="font-medium">任务窗口</h1>
+          {query.error && (
+            <p role="alert" className="text-ui-xs text-destructive">
+              {query.error.message}
+            </p>
+          )}
+          {projects.map((project) => (
+            <section key={project.id}>
+              <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
+                <h2 className="truncate text-ui-sm font-medium" title={project.name}>
+                  {project.name}
+                </h2>
                 <Button
-                  key={item.taskId}
-                  variant={item.taskId === task?.taskId ? "secondary" : "ghost"}
-                  className="w-full justify-start"
-                  aria-current={item.taskId === task?.taskId ? "page" : undefined}
+                  size="xs"
+                  variant="ghost"
+                  aria-label={`为${project.name}添加任务`}
                   onClick={() => {
-                    setSelected(item.taskId);
-                    setCreating(null);
+                    setCreating(project);
                     setEditing(false);
                   }}
                 >
-                  <span className="truncate">{item.title}</span>
-                </Button>
-              ))}
-          </section>
-        ))}
-        {projects.length === 0 && (
-          <p className="text-ui-xs text-muted-foreground">先在 Synara 中打开仓库项目。</p>
-        )}
-      </nav>
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {creating ? (
-          <NewTask
-            key={creating.id}
-            project={creating}
-            onSaved={saved}
-            onClose={() => setCreating(null)}
-          />
-        ) : task ? (
-          <>
-            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
-              <div className="min-w-0">
-                <h2 className="truncate font-medium">{task.title}</h2>
-                <p className="mt-0.5 truncate font-mono text-ui-xs text-muted-foreground">
-                  {task.taskId}
-                </p>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <span className="text-ui-xs text-muted-foreground">
-                  {task.members.length} 个 agent 会话
-                </span>
-                <Button size="sm" variant="outline" onClick={() => setEditing(!editing)}>
-                  会话归属
+                  ＋
                 </Button>
               </div>
-            </header>
-            {gate.error ? (
-              <p
-                role="alert"
-                className="border-b border-border px-4 py-2 text-ui-xs text-destructive"
-              >
-                门禁读取失败：{gate.error.message}
-              </p>
-            ) : gate.data ? (
-              gate.data.task ? (
-                <>
-                  <GateState task={gate.data.task} />
-                  <GateActions
-                    task={gate.data.task}
-                    observerFailed={gate.data.observer.state === "failed"}
-                  />
-                </>
-              ) : (
-                <p className="border-b border-border px-4 py-2 text-ui-xs text-muted-foreground">
-                  未挂验收合同
-                </p>
-              )
-            ) : (
-              <p className="border-b border-border px-4 py-2 text-ui-xs text-muted-foreground">
-                读取门禁…
-              </p>
-            )}
-            {gate.data && !gate.error && <HumanObserverStatus observer={gate.data.observer} />}
-            {editing && (
-              <MembershipEditor
-                key={task.taskId}
-                task={task}
-                threads={threads}
-                onSaved={saved}
-                onClose={() => setEditing(false)}
-              />
-            )}
-            {task.members.length ? (
-              <div className="flex min-h-0 flex-1 overflow-x-auto">
-                {task.members.map((member) => {
-                  const thread = threads.find((thread) => thread.id === member.threadId);
-                  const interventions = gate.error
-                    ? []
-                    : (gate.data?.interventions.filter(
-                        (event) => event.threadId === member.threadId,
-                      ) ?? []);
-                  return (
-                    <section
-                      key={member.threadId}
-                      aria-label={`${member.role} agent 会话`}
-                      className="flex min-h-0 min-w-80 flex-1 flex-col border-r border-border last:border-r-0"
-                      onFocusCapture={() => setFocused(member.threadId)}
-                      onPointerDown={() => setFocused(member.threadId)}
-                    >
-                      <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 text-ui-xs">
-                        <Badge variant="outline">{member.role}</Badge>
-                        <h3 className="min-w-0 flex-1 truncate">
-                          {thread?.title ?? member.threadId}
-                        </h3>
-                        {interventions.length > 0 ? (
-                          <Badge
-                            variant="warning"
-                            title={interventions[interventions.length - 1]?.time}
+              {query.data
+                ?.filter((task) => task.projectId === project.id)
+                .map((item) => (
+                  <Button
+                    key={item.taskId}
+                    variant={item.taskId === task?.taskId ? "secondary" : "ghost"}
+                    className="w-full justify-start"
+                    aria-current={item.taskId === task?.taskId ? "page" : undefined}
+                    onClick={() => {
+                      setSelected(item.taskId);
+                      setCreating(null);
+                      setEditing(false);
+                    }}
+                  >
+                    <span className="truncate">{item.title}</span>
+                  </Button>
+                ))}
+            </section>
+          ))}
+          {projects.length === 0 && (
+            <p className="text-ui-xs text-muted-foreground">先在 Synara 中打开仓库项目。</p>
+          )}
+        </nav>
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {creating ? (
+            <NewTask
+              key={creating.id}
+              project={creating}
+              onSaved={saved}
+              onClose={() => setCreating(null)}
+            />
+          ) : task ? (
+            <>
+              <header className="shrink-0 border-b border-border">
+                <div className="flex items-center justify-between gap-3 px-4 py-3">
+                  <div className="min-w-0">
+                    <h2 className="truncate font-medium">{task.title}</h2>
+                    <p className="mt-0.5 truncate font-mono text-ui-xs text-muted-foreground">
+                      {task.taskId}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-3">
+                    <span className="text-ui-xs text-muted-foreground">
+                      {task.members.length} 个会话
+                    </span>
+                    <Button size="sm" variant="outline" onClick={() => setEditing(!editing)}>
+                      会话归属
+                    </Button>
+                  </div>
+                </div>
+                {gate.error ? (
+                  <p
+                    role="alert"
+                    className="border-t border-border/60 px-4 py-2 text-ui-xs text-destructive"
+                  >
+                    门禁读取失败：{gate.error.message}
+                  </p>
+                ) : gate.data ? (
+                  gate.data.task ? (
+                    <div className="border-t border-border/60">
+                      <GateBar
+                        task={gate.data.task}
+                        observer={gate.data.observer}
+                        actions={
+                          <GateActions
+                            task={gate.data.task}
+                            observerFailed={gate.data.observer.state === "failed"}
+                          />
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <p className="border-t border-border/60 px-4 py-2 text-ui-xs text-muted-foreground">
+                      未挂验收合同
+                    </p>
+                  )
+                ) : (
+                  <p className="border-t border-border/60 px-4 py-2 text-ui-xs text-muted-foreground">
+                    读取门禁…
+                  </p>
+                )}
+              </header>
+              {editing && (
+                <MembershipEditor
+                  key={task.taskId}
+                  task={task}
+                  threads={threads}
+                  onSaved={saved}
+                  onClose={() => setEditing(false)}
+                />
+              )}
+              {task.members.length ? (
+                <div className="flex min-h-0 flex-1 snap-x snap-proximity overflow-x-auto">
+                  {task.members.map((member) => {
+                    const thread = threads.find((thread) => thread.id === member.threadId);
+                    const interventions = gate.error
+                      ? []
+                      : (gate.data?.interventions.filter(
+                          (event) => event.threadId === member.threadId,
+                        ) ?? []);
+                    const isFocused = focus === member.threadId;
+                    return (
+                      <section
+                        key={member.threadId}
+                        aria-label={`${member.role} agent 会话`}
+                        data-a2a-pane={member.threadId}
+                        className="flex min-h-0 min-w-88 flex-1 basis-0 snap-start flex-col border-r border-border last:border-r-0"
+                        onFocusCapture={() => setFocused(member.threadId)}
+                        onPointerDown={() => setFocused(member.threadId)}
+                      >
+                        <InterventionMarks paneId={member.threadId} interventions={interventions} />
+                        <header
+                          className={cn(
+                            "flex h-9 shrink-0 items-center gap-2 border-b border-border px-3 text-ui-xs",
+                            isFocused && "bg-muted/40",
+                          )}
+                        >
+                          <Badge variant="outline">{member.role}</Badge>
+                          <h3
+                            className={cn(
+                              "min-w-0 flex-1 truncate",
+                              isFocused ? "font-medium text-foreground" : "text-muted-foreground",
+                            )}
+                            title={thread?.title ?? member.threadId}
                           >
-                            人工介入 · {interventions.length}
-                          </Badge>
+                            {thread?.title ?? member.threadId}
+                          </h3>
+                          {interventions.length > 0 && (
+                            <Badge
+                              variant="warning"
+                              title={interventions[interventions.length - 1]?.time}
+                            >
+                              人工介入 {interventions.length}
+                            </Badge>
+                          )}
+                          {thread && (
+                            <Link
+                              to="/$threadId"
+                              params={{ threadId: thread.id }}
+                              className="shrink-0 text-muted-foreground hover:text-foreground focus-visible:underline"
+                            >
+                              打开
+                            </Link>
+                          )}
+                        </header>
+                        {thread && thread.projectId === task.projectId ? (
+                          <ChatView
+                            threadId={member.threadId}
+                            hideHeader
+                            paneScopeId={`a2a:${task.taskId}:${member.threadId}`}
+                            surfaceMode="split"
+                            isFocusedPane={isFocused}
+                          />
                         ) : (
-                          <span className="text-muted-foreground">人工介入 —</span>
+                          <PanelStateMessage fill="flex">
+                            会话不可用，请核对归属。
+                          </PanelStateMessage>
                         )}
-                        {thread && (
-                          <Link
-                            to="/$threadId"
-                            params={{ threadId: thread.id }}
-                            className="text-muted-foreground hover:text-foreground focus-visible:underline"
-                          >
-                            打开会话
-                          </Link>
-                        )}
-                      </header>
-                      {interventions.length > 0 && (
-                        <details className="border-b border-border px-3 py-2 text-ui-xs">
-                          <summary className="cursor-pointer text-warning">
-                            查看人工介入记录
-                          </summary>
-                          {interventions.map((event) => (
-                            <p key={event.eventId} className="mt-2 whitespace-pre-wrap break-words">
-                              <span className="text-muted-foreground">
-                                {event.time} · {event.attemptId}
-                              </span>
-                              <br />
-                              {event.text}
-                            </p>
-                          ))}
-                        </details>
-                      )}
-                      {thread && thread.projectId === task.projectId ? (
-                        <ChatView
-                          threadId={member.threadId}
-                          hideHeader
-                          paneScopeId={`a2a:${task.taskId}:${member.threadId}`}
-                          surfaceMode="split"
-                          isFocusedPane={focus === member.threadId}
-                        />
-                      ) : (
-                        <PanelStateMessage fill="flex">会话不可用，请核对归属。</PanelStateMessage>
-                      )}
-                    </section>
-                  );
-                })}
-              </div>
-            ) : (
-              <PanelStateMessage fill="flex">
-                点击“会话归属”添加本项目的 agent 会话。
-              </PanelStateMessage>
-            )}
-          </>
-        ) : (
-          <PanelStateMessage fill="flex">选择项目并添加任务。</PanelStateMessage>
-        )}
-      </section>
-    </main>
+                      </section>
+                    );
+                  })}
+                </div>
+              ) : (
+                <PanelStateMessage fill="flex">
+                  点击“会话归属”添加本项目的 agent 会话。
+                </PanelStateMessage>
+              )}
+            </>
+          ) : (
+            <PanelStateMessage fill="flex">选择项目并添加任务。</PanelStateMessage>
+          )}
+        </section>
+      </main>
+    </GateShownByTaskWindow.Provider>
   );
 }
