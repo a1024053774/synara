@@ -25,26 +25,17 @@ def build_if_needed(volume):
     cache.mkdir(parents=True, exist_ok=True)
     with (cache / "build.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        stamp = cache / "build.json"
-        files = subprocess.check_output(["git", "ls-files", "-z"], cwd=runtime.REPO).decode().split("\0")
-        inputs = [runtime.REPO / name for name in files if name and not name.endswith(".md") and ".test." not in name]
-        version = {
-            "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=runtime.REPO, text=True).strip(),
-            "inputs": {str(path.relative_to(runtime.REPO)): [path.stat().st_mtime_ns, path.stat().st_size] for path in inputs if path.is_file()},
-        }
-        outputs = ["apps/desktop/dist-electron/main.js", "apps/desktop/dist-electron/preload.js", "apps/server/dist/index.mjs", "apps/web/dist/index.html"]
+        outputs = ["apps/desktop/dist-electron/main.js", "apps/desktop/dist-electron/preload.js", "apps/desktop/dist-electron/guestPreload.js", "apps/desktop/dist-electron/cuaDriverHostStandalone.js", "apps/server/dist/index.mjs", "apps/server/dist/client/index.html", "apps/web/dist/index.html"]
         for parent in ("apps", "packages"):
             for package in (runtime.REPO / parent).iterdir():
                 for name in ("dist", "dist-electron"):
                     if (package / name).is_symlink():
                         fail(f"构建输出目录是符号链接，拒绝构建：{package / name}")
-        if stamp.exists() and json.loads(stamp.read_text(encoding="utf-8")) == version and all((runtime.REPO / name).is_file() for name in outputs):
-            return
-        print("a2a 工作台：标准 build:desktop 产物缺失或过期，开始构建。", flush=True)
+        # The standard builder owns input caching and restoration of all outputs.
+        print("a2a 工作台：检查标准 build:desktop 产物。", flush=True)
         subprocess.run([str(runtime.REPO / "a2a/scripts/bun"), "run", "build:desktop"], cwd=runtime.REPO, check=True)
         if not all((runtime.REPO / name).is_file() for name in outputs):
             fail("标准构建未产生完整桌面产物。")
-        stamp.write_text(json.dumps(version) + "\n", encoding="utf-8")
 
 
 def main():
@@ -104,7 +95,7 @@ def main():
                 endpoint = runtime.read_endpoint(data)
                 try:
                     with urlopen(endpoint["origin"] + "/health", timeout=2) as response:
-                        ready = response.status == 200
+                        ready = response.status == 200 and json.load(response).get("startupReady") is True
                 except OSError:
                     ready = False
                 if ready:

@@ -8,7 +8,7 @@
 ./a2a/scripts/workbench stop
 ```
 
-启动器要求 macOS arm64 和已挂载的 `/Volumes/WD-Elements`，检查规则与 `a2a/scripts/bun` 相同。缺盘直接报错。首次启动或源码、提交、桌面产物发生变化时，先经 `a2a/scripts/bun run build:desktop` 标准构建，再后台启动 Electron。重复启动显示“已在运行”。进程脱离调用终端，关闭终端后继续运行；`stop` 核对 PID、启动时间和命令后向本实例发送 SIGUSR2，让桌面经既有优雅退出流程关闭后端。它只在本工作台中注册；普通界面退出保留确认框。停止超时保留现场供主控处理。
+启动器要求 macOS arm64 和已挂载的 `/Volumes/WD-Elements`，检查规则与 `a2a/scripts/bun` 相同。缺盘直接报错。启动前经 `a2a/scripts/bun run build:desktop` 检查标准产物，由既有构建系统处理缓存、缺失文件恢复和重建，然后后台启动 Electron。重复启动显示“已在运行”。启动成功还要求后端 `/health` 的 `startupReady=true`。进程脱离调用终端，关闭终端后继续运行；`stop` 核对 PID、启动时间和命令后向本实例发送 SIGUSR2，让桌面经既有优雅退出流程关闭后端。它只在本工作台中注册；普通界面退出保留确认框。停止超时保留现场供主控处理。
 
 日常数据固定在 `~/Library/Application Support/a2a-workbench`：`userdata/` 保存设置、SQLite 与日志，`electron-profile/` 保存本工作台的 Electron profile。它们与官方 Synara 的数据分开。启动日志在 `workbench-launch.log`；`status` 只读，不创建目录。测试可通过 `A2A_WORKBENCH_DATA_DIR` 指定独立目录，日常使用应移除此变量。
 
