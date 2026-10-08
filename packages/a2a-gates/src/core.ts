@@ -95,6 +95,7 @@ export class A2AGates {
     this.db.close();
   }
   taskForThread(thread: string): A2ATask | null {
+    if (!thread) return null;
     const rows = this.db.prepare("SELECT data FROM tasks").all();
     for (const row of rows) {
       const task = JSON.parse(String(row.data)) as A2ATask;
@@ -303,6 +304,8 @@ export class A2AGates {
     try {
       const args = Schema.decodeUnknownSync(A2AGateRequest)(raw);
       taskId = id(args.task);
+      if (args.attempt !== undefined) id(args.attempt);
+      if (args.session !== undefined) id(args.session);
       if (args.command === "status") return { ok: true, task: this.load(taskId) };
       if (args.command === "events") {
         const rows = this.db

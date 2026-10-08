@@ -7,7 +7,8 @@ import { A2AGates, type GateRuntime } from "./core";
 
 // Frozen supervised-run contract: historical cleanup must not select a new owner.
 // Failure modes: reject the valid historical binding; change the current task;
-// close a foreign/current thread; repeat a completed effect; close a working thread.
+// close a foreign/current thread; repeat a completed effect; close a working thread;
+// treat an empty expected attempt as current or a missing thread as locally bound.
 // This isolates ownership logic with real Git/SQLite and a thread boundary double.
 // It provides no claim about a real provider, authentication, or native lifecycle.
 test("reclaims only the specified historical attempt and preserves the replacement", async () => {
@@ -167,6 +168,46 @@ test("reclaims only the specified historical attempt and preserves the replaceme
     expect(busy.error).toBe("worker_working");
     expect(stopped).toEqual([old.thread_id]);
     expect((await gates.call({ command: "status", task: "history" })).task).toEqual(latest);
+    const local = await gates.call({
+      command: "claim",
+      task: "foreign",
+      owner: "Local identity boundary",
+    });
+    expect(local.ok).toBe(true);
+    const identity = local.attempt!;
+    expect(
+      (
+        await gates.call({
+          command: "submit",
+          task: "foreign",
+          attempt: identity.attempt_id,
+          session: identity.session_id,
+          fence: identity.fence,
+          spec_rev: identity.spec_rev,
+          commit: base,
+        })
+      ).ok,
+    ).toBe(true);
+    const submitted = (await gates.call({ command: "status", task: "foreign" })).task;
+    expect.soft(gates.taskForThread("")).toBeNull();
+    for (const command of ["verify", "integrate", "reclaim"]) {
+      const denied = await gates.call({ command, task: "foreign", attempt: "" });
+      expect.soft(denied.ok).toBe(false);
+      expect.soft(denied.error).toBe("invalid_id");
+      expect
+        .soft((await gates.call({ command: "status", task: "foreign" })).task)
+        .toEqual(submitted);
+    }
+    const emptySession = await gates.call({
+      command: "submit",
+      task: "foreign",
+      attempt: identity.attempt_id,
+      session: "",
+      fence: identity.fence,
+      spec_rev: identity.spec_rev,
+      commit: base,
+    });
+    expect(emptySession.error).toBe("invalid_id");
   } finally {
     gates.close();
   }
