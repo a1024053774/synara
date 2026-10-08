@@ -376,6 +376,7 @@ export class A2AGates {
       live = await this.runtime!.readThread(attempt.thread_id);
     } catch (error) {
       this.current(this.load(run.task_id), run.attempt_id!);
+      if (error instanceof Refusal) throw error;
       throw new Refusal("run_external_unknown", String(error));
     }
     this.current(this.load(run.task_id), run.attempt_id!);
