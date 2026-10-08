@@ -21,15 +21,19 @@ export function readManagedThread(
     throw new Refusal("identity_conflict", { shell, active });
   if (
     shell.session?.status === "error" ||
-    shell.session?.status === "interrupted" ||
+    (shell.session?.status === "interrupted" && active) ||
     active?.status === "error"
   )
     throw new Refusal("run_external_unknown", { shell, active });
   const turn = shell.session?.activeTurnId ?? shell.latestTurn?.turnId ?? null;
   const running =
     shell.latestTurn?.state === "running" ||
-    (shell.session?.status === "running" && shell.session.activeTurnId !== null);
-  if (active?.activeTurnId && active.activeTurnId !== turn)
+    (shell.session?.status === "running" && shell.session.activeTurnId !== null) ||
+    (!turn && Boolean(active?.activeTurnId));
+  // A native turn can precede its projection. Keep it unbound until the shell
+  // supplies the turn; the existing run deadline bounds observation, and submit
+  // still requires that projected turn to match the caller.
+  if (turn && active?.activeTurnId && active.activeTurnId !== turn)
     throw new Refusal("identity_conflict", { shell, active });
   if (running && !active?.activeTurnId)
     throw new Refusal("run_external_unknown", { shell, active });
@@ -39,7 +43,10 @@ export function readManagedThread(
     turn,
     running,
     blocked: shell.hasPendingApprovals === true || shell.hasPendingUserInput === true,
-    stopped: shell.session?.status === "stopped" && !active,
+    // An interrupted thread with no provider runtime cannot complete a run,
+    // but the gate can stop/archive it through the same locked reclaim path.
+    stopped:
+      !active && (shell.session?.status === "stopped" || shell.session?.status === "interrupted"),
     archived: shell.archivedAt !== null,
   };
 }
