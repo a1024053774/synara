@@ -1,8 +1,9 @@
 import type { ResolvedKeybindingsConfig } from "@synara/contracts";
 import { CHAT_SURFACE_HEADER_HEIGHT_PX } from "@synara/shared/desktopChrome";
 import { useQuery } from "@tanstack/react-query";
-import { Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
+import { Link, Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "../components/ui/button";
 
 import {
   goBackInAppHistory,
@@ -600,7 +601,19 @@ function ChatRouteLayout() {
       transparentSurface
       resizable={THREAD_SIDEBAR_RESIZABLE}
     >
-      <ThreadSidebar />
+      <div className="shrink-0 border-b border-border px-3 py-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="w-full justify-start"
+          render={<Link to="/a2a" />}
+        >
+          任务窗口
+        </Button>
+      </div>
+      <div className="min-h-0 flex-1">
+        <ThreadSidebar />
+      </div>
     </Sidebar>
   );
 

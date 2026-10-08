@@ -8,6 +8,7 @@ import { ServerConfig } from "../config";
 import { shouldRejectUntrustedRequestOrigin, normalizeCorsOrigin } from "../trustedOrigins";
 import { authenticateRpcWebSocketUpgrade } from "../wsRpc";
 import { readMcpJsonBody } from "../agentGateway/httpRoute";
+import { membershipRoute } from "./membershipRoute";
 
 const route = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
@@ -45,6 +46,16 @@ const route = Effect.gen(function* () {
       }
     : {};
   const gates = yield* A2AGateService;
+  if (request.method === "OPTIONS")
+    return HttpServerResponse.empty({
+      headers: {
+        ...headers,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "600",
+      },
+    });
+  if (url.pathname === "/api/a2a/membership") return yield* membershipRoute(request, headers);
   if (request.method === "GET") {
     const task = gates.taskForThread(url.searchParams.get("thread") ?? "");
     return HttpServerResponse.jsonUnsafe(
@@ -71,4 +82,8 @@ const route = Effect.gen(function* () {
 export const a2aGateRouteLayer = Layer.mergeAll(
   HttpRouter.add("POST", "/api/a2a", route),
   HttpRouter.add("GET", "/api/a2a", route),
+  HttpRouter.add("OPTIONS", "/api/a2a", route),
+  HttpRouter.add("GET", "/api/a2a/membership", route),
+  HttpRouter.add("POST", "/api/a2a/membership", route),
+  HttpRouter.add("OPTIONS", "/api/a2a/membership", route),
 );

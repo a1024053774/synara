@@ -16,6 +16,7 @@ import { Route as ChatPullRequestsRouteImport } from './routes/_chat.pull-reques
 import { Route as ChatPluginsRouteImport } from './routes/_chat.plugins'
 import { Route as ChatInboxRouteImport } from './routes/_chat.inbox'
 import { Route as ChatAutomationsRouteImport } from './routes/_chat.automations'
+import { Route as ChatA2aRouteImport } from './routes/_chat.a2a'
 import { Route as ChatThreadIdRouteImport } from './routes/_chat.$threadId'
 import { Route as ChatTasksIndexRouteImport } from './routes/_chat.tasks.index'
 import { Route as ChatStudioIndexRouteImport } from './routes/_chat.studio.index'
@@ -59,6 +60,11 @@ const ChatInboxRoute = ChatInboxRouteImport.update({
 const ChatAutomationsRoute = ChatAutomationsRouteImport.update({
   id: '/automations',
   path: '/automations',
+  getParentRoute: () => ChatRoute,
+} as any)
+const ChatA2aRoute = ChatA2aRouteImport.update({
+  id: '/a2a',
+  path: '/a2a',
   getParentRoute: () => ChatRoute,
 } as any)
 const ChatThreadIdRoute = ChatThreadIdRouteImport.update({
@@ -116,6 +122,7 @@ const ChatAutomationsAutomationIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
   '/$threadId': typeof ChatThreadIdRoute
+  '/a2a': typeof ChatA2aRoute
   '/automations': typeof ChatAutomationsRouteWithChildren
   '/inbox': typeof ChatInboxRoute
   '/plugins': typeof ChatPluginsRoute
@@ -133,6 +140,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/$threadId': typeof ChatThreadIdRoute
+  '/a2a': typeof ChatA2aRoute
   '/inbox': typeof ChatInboxRoute
   '/plugins': typeof ChatPluginsRoute
   '/settings': typeof ChatSettingsRoute
@@ -151,6 +159,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_chat': typeof ChatRouteWithChildren
   '/_chat/$threadId': typeof ChatThreadIdRoute
+  '/_chat/a2a': typeof ChatA2aRoute
   '/_chat/automations': typeof ChatAutomationsRouteWithChildren
   '/_chat/inbox': typeof ChatInboxRoute
   '/_chat/plugins': typeof ChatPluginsRoute
@@ -172,6 +181,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/$threadId'
+    | '/a2a'
     | '/automations'
     | '/inbox'
     | '/plugins'
@@ -189,6 +199,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/$threadId'
+    | '/a2a'
     | '/inbox'
     | '/plugins'
     | '/settings'
@@ -206,6 +217,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_chat'
     | '/_chat/$threadId'
+    | '/_chat/a2a'
     | '/_chat/automations'
     | '/_chat/inbox'
     | '/_chat/plugins'
@@ -276,6 +288,13 @@ declare module '@tanstack/react-router' {
       path: '/automations'
       fullPath: '/automations'
       preLoaderRoute: typeof ChatAutomationsRouteImport
+      parentRoute: typeof ChatRoute
+    }
+    '/_chat/a2a': {
+      id: '/_chat/a2a'
+      path: '/a2a'
+      fullPath: '/a2a'
+      preLoaderRoute: typeof ChatA2aRouteImport
       parentRoute: typeof ChatRoute
     }
     '/_chat/$threadId': {
@@ -378,6 +397,7 @@ const ChatPullRequestsRouteWithChildren =
 
 interface ChatRouteChildren {
   ChatThreadIdRoute: typeof ChatThreadIdRoute
+  ChatA2aRoute: typeof ChatA2aRoute
   ChatAutomationsRoute: typeof ChatAutomationsRouteWithChildren
   ChatInboxRoute: typeof ChatInboxRoute
   ChatPluginsRoute: typeof ChatPluginsRoute
@@ -394,6 +414,7 @@ interface ChatRouteChildren {
 
 const ChatRouteChildren: ChatRouteChildren = {
   ChatThreadIdRoute: ChatThreadIdRoute,
+  ChatA2aRoute: ChatA2aRoute,
   ChatAutomationsRoute: ChatAutomationsRouteWithChildren,
   ChatInboxRoute: ChatInboxRoute,
   ChatPluginsRoute: ChatPluginsRoute,
