@@ -1,8 +1,9 @@
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { A2AGates } from "@synara/a2a-gates";
+import { A2AGates, Refusal } from "@synara/a2a-gates";
 import { CommandId, MessageId, ProjectId, ThreadId, type ModelSelection } from "@synara/contracts";
 import { Effect, Layer, Option, ServiceMap } from "effect";
+import { installHumanInputRecording, readManagedThread } from "./orchestration";
 import { ServerConfig } from "../config";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery";
@@ -87,15 +88,9 @@ export const A2AGateServiceLive = Layer.effect(
         );
         if (Option.isNone(value)) throw new Error("thread_identity_unknown");
         const shell = value.value;
+        if (shell.id !== thread) throw new Refusal("identity_conflict");
         const sessions = await Effect.runPromise(providers.listSessions());
-        return {
-          workspace: shell.worktreePath ?? "",
-          provider: shell.modelSelection.provider,
-          turn: shell.latestTurn?.turnId ?? null,
-          running: shell.latestTurn?.state === "running",
-          stopped: !sessions.some((session) => session.threadId === thread),
-          archived: shell.archivedAt !== null,
-        };
+        return readManagedThread(shell, sessions);
       },
       stopThread: async (thread) => {
         await Effect.runPromise(providers.stopSession({ threadId: ThreadId.makeUnsafe(thread) }));
@@ -119,6 +114,7 @@ export const A2AGateServiceLive = Layer.effect(
       },
     });
     yield* Effect.addFinalizer(() => Effect.sync(() => core.close()));
+    yield* installHumanInputRecording(core, engine);
     return core;
   }),
 );

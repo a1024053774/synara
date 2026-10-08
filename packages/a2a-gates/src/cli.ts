@@ -1,11 +1,12 @@
 import { parseArgs } from "node:util";
 import { A2AGateRequest } from "@synara/contracts";
 import { Schema } from "effect";
-import { A2AGates, Refusal } from "./core";
+import { A2AGates, Refusal, type GateRuntime } from "./core";
 
-const argv = process.argv.slice(2);
 const commands: Record<string, { required: string[]; optional?: string[] }> = {
-  create: { required: ["repo", "base", "oracle", "instructions"] },
+  create: { required: ["repo", "base", "oracle", "instructions"], optional: ["project"] },
+  dispatch: { required: ["runtime-mode"] },
+  run: { required: ["runtime-mode", "wait-seconds"] },
   claim: { required: ["owner"] },
   revoke: { required: ["reason"] },
   revise: { required: ["spec-rev"] },
@@ -25,7 +26,7 @@ async function emit(result: unknown) {
   });
 }
 
-async function main() {
+export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) {
   // The HTTP transport remains available for native thread lifecycle commands.
   if (argv[0] && !argv[0].startsWith("-")) {
     const [endpoint, json] = argv;
@@ -57,6 +58,9 @@ async function main() {
       "state",
       "task",
       "repo",
+      "project",
+      "runtime-mode",
+      "wait-seconds",
       "base",
       "oracle",
       "instructions",
@@ -87,7 +91,7 @@ async function main() {
     request = { command };
     for (const [key, value] of Object.entries(values)) {
       if (key === "state") continue;
-      if (key === "fence" || key === "spec-rev") {
+      if (key === "fence" || key === "spec-rev" || key === "wait-seconds") {
         if (
           typeof value !== "string" ||
           !/^[+-]?\d+$/.test(value) ||
@@ -95,7 +99,7 @@ async function main() {
         )
           throw new Error("integer required: " + key);
         request[key.replaceAll("-", "_")] = Number(value);
-      } else request[key] = value;
+      } else request[key === "runtime-mode" ? "runtimeMode" : key] = value;
     }
   } catch (error) {
     console.error("usage: --state ABS_DIR COMMAND --task ID ...\n" + String(error));
@@ -103,7 +107,7 @@ async function main() {
   }
   let gates: A2AGates;
   try {
-    gates = new A2AGates(root);
+    gates = new A2AGates(root, runtime);
   } catch (error) {
     await emit({
       ok: false,
@@ -120,4 +124,4 @@ async function main() {
     gates.close();
   }
 }
-process.exitCode = await main();
+if (import.meta.main) process.exitCode = await main();

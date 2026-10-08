@@ -7,6 +7,7 @@ export const A2AGateRequest = Schema.Struct({
     "revoke",
     "revise",
     "dispatch",
+    "run",
     "submit",
     "verify",
     "integrate",
@@ -27,6 +28,7 @@ export const A2AGateRequest = Schema.Struct({
   fence: Schema.optional(Schema.Number),
   spec_rev: Schema.optional(Schema.Number),
   commit: Schema.optional(Schema.String),
+  wait_seconds: Schema.optional(Schema.Number),
   runtimeMode: Schema.optional(Schema.Literals(["approval-required", "full-access"])),
 });
 export type A2AGateRequest = typeof A2AGateRequest.Type;
@@ -101,9 +103,26 @@ export interface A2ATask {
   } | null;
 }
 
+export interface A2ARun {
+  run_id: string;
+  task_id: string;
+  attempt_id: string | null;
+  thread_id: string | null;
+  started: string;
+  ended?: string;
+  wait_seconds: number;
+  phase: string;
+  outcome: string;
+  reclaimed?: boolean;
+  error?: string;
+  details?: unknown;
+  cleanup_failure?: unknown;
+}
+
 export interface A2AGateResult {
   ok: boolean;
   task?: A2ATask;
+  run?: A2ARun;
   attempt?: A2AAttempt;
   verification?: A2AVerification;
   replayed?: boolean;

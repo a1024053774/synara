@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import {
   A2AGateRequest,
   type A2AAttempt,
+  type A2ARun,
   type A2AGateResult,
   type A2AVerification,
   type A2ACommandResult,
@@ -55,6 +56,7 @@ export interface GateRuntime {
     running: boolean;
     stopped: boolean;
     archived: boolean;
+    blocked?: boolean;
   }>;
   stopThread(thread: string): Promise<void>;
   archiveThread(thread: string): Promise<void>;
@@ -79,6 +81,8 @@ export class A2AGates {
       CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS verifications (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, task TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS human_inputs (event_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, task TEXT NOT NULL, attempt TEXT, type TEXT NOT NULL, details TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;`);
@@ -102,6 +106,50 @@ export class A2AGates {
       if (task.current_attempt?.thread_id === thread) return task;
     }
     return null;
+  }
+  recordHumanInput(input: {
+    thread_id: string;
+    message_id: string;
+    event_id: string;
+    source_sequence: number;
+    turn_id: string | null;
+    created_at: string;
+    text: string;
+    dispatch_origin: "user";
+  }): boolean {
+    const row = this.db
+      .prepare("SELECT data FROM attempts WHERE json_extract(data,'$.thread_id')=?")
+      .get(input.thread_id);
+    if (!input.thread_id || !row) return false;
+    const attempt = JSON.parse(String(row.data)) as A2AAttempt;
+    requireGate(
+      input.event_id && input.message_id && input.dispatch_origin === "user",
+      "invalid_human_input",
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const inserted = this.db
+        .prepare("INSERT OR IGNORE INTO human_inputs(event_id) VALUES (?)")
+        .run(input.event_id);
+      if (!inserted.changes) return false;
+      this.event(
+        attempt.task_id,
+        "human_intervention",
+        {
+          ...input,
+          task_id: attempt.task_id,
+          attempt_id: attempt.attempt_id,
+          session_id: attempt.session_id,
+          fence: attempt.fence,
+          spec_rev: attempt.spec_rev,
+        },
+        attempt.attempt_id,
+      );
+      this.db.exec("COMMIT");
+      return true;
+    } finally {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+    }
   }
   private event(task: string, type: string, details: unknown, expectedAttempt?: string) {
     const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(task);
@@ -298,7 +346,218 @@ export class A2AGates {
     return attempt;
   }
 
+  private saveRun(run: A2ARun, type: string) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO runs(id,task,data) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+        )
+        .run(run.run_id, run.task_id, JSON.stringify(run));
+      this.event(run.task_id, type, run, run.attempt_id ?? undefined);
+      this.db.exec("COMMIT");
+    } finally {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+    }
+  }
+  private checkThread(attempt: A2AAttempt, live: Awaited<ReturnType<GateRuntime["readThread"]>>) {
+    requireGate(
+      live.workspace === attempt.workspace &&
+        live.provider === "codex" &&
+        (!attempt.turn_id || live.turn === attempt.turn_id),
+      "identity_conflict",
+      { attempt, live },
+    );
+  }
+  private async observeRun(run: A2ARun) {
+    const attempt = this.current(this.load(run.task_id), run.attempt_id!);
+    let live: Awaited<ReturnType<GateRuntime["readThread"]>>;
+    try {
+      live = await this.runtime!.readThread(attempt.thread_id);
+    } catch (error) {
+      this.current(this.load(run.task_id), run.attempt_id!);
+      throw new Refusal("run_external_unknown", String(error));
+    }
+    this.current(this.load(run.task_id), run.attempt_id!);
+    this.checkThread(attempt, live);
+    requireGate(!live.blocked, "run_blocked", live);
+    requireGate(!live.archived && !live.stopped, "run_external_unknown", live);
+    if (!attempt.turn_id && live.turn) {
+      // Binding is an ordinary task mutation. Refuse a concurrent gate owner.
+      const lock = new DatabaseSync(join(this.root, "locks", `${run.task_id}.sqlite3`));
+      try {
+        lock.exec("PRAGMA busy_timeout=0; BEGIN IMMEDIATE");
+        const task = this.load(run.task_id);
+        const current = this.current(task, run.attempt_id!);
+        requireGate(!current.turn_id || current.turn_id === live.turn, "identity_conflict");
+        current.turn_id = live.turn;
+        this.save(task, "turn_bound", { attempt: current });
+      } finally {
+        lock.close();
+      }
+    }
+    return live;
+  }
+  private async waitForIdle(run: A2ARun) {
+    const deadline = performance.now() + 60_000;
+    for (;;) {
+      const row = this.db.prepare("SELECT data FROM attempts WHERE id=?").get(run.attempt_id!);
+      requireGate(row, "unknown_attempt");
+      const attempt = JSON.parse(String(row.data)) as A2AAttempt;
+      requireGate(
+        attempt.task_id === run.task_id && attempt.thread_id === run.thread_id,
+        "identity_conflict",
+      );
+      if (attempt.reclaimed) return;
+      const live = await this.runtime!.readThread(attempt.thread_id);
+      this.checkThread(attempt, live);
+      requireGate(!live.blocked, "run_blocked", live);
+      if (!live.running) return;
+      requireGate(performance.now() < deadline, "run_reclaim_deadline", live);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  private async run(args: A2AGateRequest): Promise<A2AGateResult> {
+    requireGate(Number.isSafeInteger(args.wait_seconds) && args.wait_seconds! > 0, "invalid_wait");
+    requireGate(args.runtimeMode, "runtime_mode_required");
+    requireGate(this.runtime, "runtime_required");
+    this.load(args.task);
+    const lock = new DatabaseSync(join(this.root, "locks", `${args.task}.run.sqlite3`));
+    let run: A2ARun | undefined;
+    try {
+      lock.exec("PRAGMA busy_timeout=0");
+      try {
+        lock.exec("BEGIN IMMEDIATE");
+      } catch (error) {
+        if (
+          (error as { errcode?: number }).errcode === 5 ||
+          (error as Error).message.includes("database is locked")
+        )
+          throw new Refusal("run_busy");
+        throw error;
+      }
+      run = {
+        run_id: randomUUID(),
+        task_id: args.task,
+        attempt_id: null,
+        thread_id: null,
+        started: new Date().toISOString(),
+        wait_seconds: args.wait_seconds!,
+        phase: "dispatching",
+        outcome: "running",
+      };
+      this.saveRun(run, "run_started");
+      const dispatch = await this.request(
+        { command: "dispatch", task: args.task, runtimeMode: args.runtimeMode },
+        undefined,
+        run,
+      );
+      requireGate(dispatch.ok, dispatch.error ?? "gate_failure", dispatch.details);
+      run.phase = "waiting_submit";
+      this.saveRun(run, "run_phase");
+      const deadline = performance.now() + args.wait_seconds! * 1000;
+      let previous = "";
+      for (;;) {
+        this.current(this.load(args.task), run.attempt_id!);
+        requireGate(performance.now() < deadline, "run_deadline");
+        const live = await this.observeRun(run);
+        const task = this.load(args.task);
+        const change = JSON.stringify({
+          task_state: task.state,
+          turn: live.turn,
+          running: live.running,
+          blocked: live.blocked ?? false,
+        });
+        if (change !== previous) {
+          this.event(
+            args.task,
+            "run_observed",
+            { run_id: run.run_id, live, task_state: task.state },
+            run.attempt_id!,
+          );
+          previous = change;
+        }
+        requireGate(performance.now() < deadline, "run_deadline");
+        requireGate(["claimed", "submitted"].includes(task.state), "run_state_changed", task.state);
+        if (task.state === "submitted") break;
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(100, Math.max(0, deadline - performance.now()))),
+        );
+      }
+      for (const command of ["verify", "integrate"] as const) {
+        run.phase = command === "verify" ? "verifying" : "integrating";
+        this.saveRun(run, "run_phase");
+        const result = await this.request({ command, task: args.task, attempt: run.attempt_id! });
+        requireGate(result.ok, result.error ?? "gate_failure", result.details);
+      }
+      run.phase = "reclaiming";
+      this.saveRun(run, "run_phase");
+      await this.waitForIdle(run);
+      const cleanup = await this.request({
+        command: "reclaim",
+        task: args.task,
+        attempt: run.attempt_id!,
+      });
+      requireGate(cleanup.ok, "run_reclaim_failed", cleanup);
+      run.reclaimed = true;
+      run.outcome = "completed";
+      run.ended = new Date().toISOString();
+      this.saveRun(run, "run_finished");
+      return { ok: true, task: this.load(args.task), run };
+    } catch (error) {
+      if (!run) throw error;
+      const code =
+        error instanceof Refusal
+          ? error.code === "stale_attempt"
+            ? "run_superseded"
+            : error.code
+          : "run_external_unknown";
+      const details = error instanceof Refusal ? error.details : String(error);
+      if (
+        run.attempt_id &&
+        ["run_deadline", "run_superseded", "oracle_failed", "merge_failed"].includes(code)
+      ) {
+        try {
+          await this.waitForIdle(run);
+          const cleanup = await this.request({
+            command: "reclaim",
+            task: args.task,
+            attempt: run.attempt_id,
+          });
+          requireGate(cleanup.ok, cleanup.error ?? "run_reclaim_failed", cleanup.details);
+          run.reclaimed = true;
+        } catch (cleanup) {
+          run.cleanup_failure =
+            cleanup instanceof Refusal
+              ? { error: cleanup.code, details: cleanup.details }
+              : String(cleanup);
+        }
+      }
+      run.error = code;
+      run.details = details;
+      run.outcome =
+        code === "run_deadline"
+          ? "deadline"
+          : code === "run_superseded"
+            ? "superseded"
+            : ["oracle_failed", "merge_failed"].includes(code)
+              ? "verification_failed"
+              : run.phase === "reclaiming"
+                ? "integrated_reclaim_failed"
+                : "paused";
+      run.ended = new Date().toISOString();
+      this.saveRun(run, "run_finished");
+      return { ok: false, error: code, details, task: this.load(args.task), run };
+    } finally {
+      lock.close();
+    }
+  }
+
   async call(raw: unknown, caller?: SubmitCaller): Promise<A2AGateResult> {
+    return this.request(raw, caller);
+  }
+
+  private async request(raw: unknown, caller?: SubmitCaller, run?: A2ARun): Promise<A2AGateResult> {
     let taskId: string | undefined;
     let lock: DatabaseSync | undefined;
     try {
@@ -306,6 +565,7 @@ export class A2AGates {
       taskId = id(args.task);
       if (args.attempt !== undefined) id(args.attempt);
       if (args.session !== undefined) id(args.session);
+      if (args.command === "run") return await this.run(args);
       if (args.command === "status") return { ok: true, task: this.load(taskId) };
       if (args.command === "events") {
         const rows = this.db
@@ -410,7 +670,8 @@ export class A2AGates {
         }
         const owner = text(args.command === "claim" ? args.owner : taskId);
         requireGate(task.state === "ready" && !task.current_attempt, "already_claimed");
-        const base = task.base_commit;
+        const base =
+          args.command === "dispatch" ? sha(await this.integration(task)) : task.base_commit;
         const attempt: A2AAttempt = {
           task_id: taskId,
           attempt_id: randomUUID(),
@@ -436,6 +697,11 @@ export class A2AGates {
             ? { model: "gpt-6.1-sol", reasoning_effort: "xhigh", requested_service_tier: "fast" }
             : {}),
         });
+        if (run) {
+          run.attempt_id = attempt.attempt_id;
+          run.thread_id = attempt.thread_id;
+          this.saveRun(run, "run_bound");
+        }
         mkdirSync(join(this.root, "worktrees"), { recursive: true });
         try {
           await this.git(taskId, task.repo, [
@@ -451,7 +717,12 @@ export class A2AGates {
           this.save(task, "worktree_failed", { reason: String(error) });
           throw new Refusal("worktree_failed");
         }
-        if (args.command === "dispatch") await this.runtime!.createThread(task, attempt);
+        if (args.command === "dispatch") {
+          await this.runtime!.createThread(task, attempt);
+          const live = await this.runtime!.readThread(attempt.thread_id);
+          this.checkThread(attempt, live);
+          requireGate(!live.blocked, "run_blocked", live);
+        }
         attempt.state = "claimed";
         task.state = "claimed";
         this.save(task, "claimed");
@@ -468,8 +739,11 @@ export class A2AGates {
         const prompt = `${readFileSync(task.instructions, "utf8")}\n\nManaged attempt identity: ${JSON.stringify(submit)}\nAfter implementing and committing, explicitly call the a2a_submit MCP tool with this identity and your full commit SHA. Never submit passed=true. Only this tool delivers your work; turn completion does not. Do not modify the contract or any acceptance tool. If any unexpected approval is requested, stop and report it.`;
         this.event(taskId, "prompt_intent", { thread: attempt.thread_id, prompt });
         await this.runtime!.startThread(task, attempt, prompt);
-        this.event(taskId, "dispatched", { attempt });
-        return { ok: true, task };
+        const live = await this.runtime!.readThread(attempt.thread_id);
+        this.checkThread(attempt, live);
+        attempt.turn_id = live.turn;
+        this.save(task, "dispatched", { attempt });
+        return { ok: true, task, attempt };
       }
       let historicalAttempt: A2AAttempt | undefined;
       if (
@@ -510,6 +784,7 @@ export class A2AGates {
             live.workspace === attempt.workspace &&
               live.provider === "codex" &&
               live.running &&
+              !live.blocked &&
               live.turn === caller.turn,
             "identity_conflict",
           );
@@ -736,14 +1011,18 @@ export class A2AGates {
         live.workspace === attempt.workspace && live.provider === "codex",
         "identity_conflict",
       );
+      this.checkThread(attempt, live);
+      requireGate(!live.blocked, "run_blocked", live);
       requireGate(!live.running, "worker_working");
       this.event(taskId, "reclaim_intent", { attempt, live }, attempt.attempt_id);
       if (ownsTask && task.state !== "accepted") this.invalidate(task, "controller reclaim");
       await this.runtime.stopThread(attempt.thread_id);
       const stopped = await this.runtime.readThread(attempt.thread_id);
+      this.checkThread(attempt, stopped);
       requireGate(stopped.stopped, "stop_unconfirmed");
       await this.runtime.archiveThread(attempt.thread_id);
       const archived = await this.runtime.readThread(attempt.thread_id);
+      this.checkThread(attempt, archived);
       requireGate(archived.archived && archived.stopped, "reclaim_unconfirmed");
       attempt.reclaimed = true;
       this.save(task, "reclaimed", { attempt, archived }, attempt);
