@@ -3,6 +3,9 @@ import { Schema } from "effect";
 export const A2AGateRequest = Schema.Struct({
   command: Schema.Literals([
     "create",
+    "claim",
+    "revoke",
+    "revise",
     "dispatch",
     "submit",
     "verify",
@@ -17,6 +20,8 @@ export const A2AGateRequest = Schema.Struct({
   base: Schema.optional(Schema.String),
   oracle: Schema.optional(Schema.String),
   instructions: Schema.optional(Schema.String),
+  owner: Schema.optional(Schema.String),
+  reason: Schema.optional(Schema.String),
   attempt: Schema.optional(Schema.String),
   session: Schema.optional(Schema.String),
   fence: Schema.optional(Schema.Number),
@@ -38,6 +43,19 @@ export interface A2AAttempt {
   workspace: string;
   base_commit: string;
   reclaimed: boolean;
+  owner?: string;
+  state?: string;
+  revocation_reason?: string;
+}
+
+export interface A2ACommandResult {
+  argv: string[];
+  cwd: string;
+  stdout: string | null;
+  stderr: string | null;
+  exit: number | null;
+  returncode: number | null;
+  outcome?: string;
 }
 
 export interface A2AVerification {
@@ -46,11 +64,13 @@ export interface A2AVerification {
   spec_rev: number;
   G: string;
   C: string;
-  M: string;
+  M: string | null;
   oracle: string;
   workspace: string;
-  state: "running" | "passed" | "failed";
-  result?: { argv: string[]; cwd: string; stdout: string; stderr: string; exit: number | null };
+  state: "running" | "passed" | "failed" | "interrupted" | "unknown" | "merge_failed";
+  command_intent?: { argv: string[]; cwd: string };
+  result?: A2ACommandResult;
+  ended?: string;
 }
 
 export interface A2ATask {
@@ -71,6 +91,12 @@ export interface A2ATask {
     M: string;
     verification_id: string;
     attempt: A2AAttempt;
+    spec_rev?: number;
+    C?: string;
+    oracle?: string;
+    intent_id?: string;
+    command_intent?: { argv: string[]; cwd: string };
+    result?: A2ACommandResult;
     state: "pending" | "completed";
   } | null;
 }
@@ -78,6 +104,10 @@ export interface A2ATask {
 export interface A2AGateResult {
   ok: boolean;
   task?: A2ATask;
+  attempt?: A2AAttempt;
+  verification?: A2AVerification;
+  replayed?: boolean;
+  reconciled?: boolean;
   error?: string;
   details?: unknown;
   events?: ReadonlyArray<{ seq: number; time: string; type: string; details: unknown }>;
