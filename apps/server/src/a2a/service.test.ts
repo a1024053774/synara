@@ -579,10 +579,19 @@ describe("a2a native observation seam", () => {
         (e: unknown) => e instanceof Refusal && e.code === "run_external_unknown",
       );
       shell = { ...shell, session: { ...shell.session!, status: "error" } };
-      assert.throws(
-        () => readManagedThread(shell, [active]),
-        (e: unknown) => e instanceof Refusal && e.code === "run_external_unknown",
+      f.shell = shell;
+      const before = (await f.gates.call({ command: "status", task: "controlled" })).task!;
+      const rejected = await f.gates.call({
+        command: "reclaim",
+        task: "controlled",
+        attempt: before.current_attempt!.attempt_id,
+      });
+      assert.equal(rejected.error, "run_external_unknown");
+      assert.deepEqual(
+        (await f.gates.call({ command: "status", task: "controlled" })).task,
+        before,
       );
+      assert.deepEqual(f.effects, []);
       shell = { ...shell, session: { ...shell.session!, status: "interrupted" } };
       assert.throws(
         () => readManagedThread(shell, [active]),

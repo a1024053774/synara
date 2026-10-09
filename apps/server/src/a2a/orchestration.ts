@@ -17,12 +17,9 @@ export function readManagedThread(
   const active = matches[0];
   if (active && (active.cwd !== workspace || active.provider !== shell.modelSelection.provider))
     throw new Refusal("identity_conflict", { shell, active });
-  if (
-    shell.session?.status === "error" ||
-    (shell.session?.status === "interrupted" && active) ||
-    active?.status === "error"
-  )
+  if (shell.session?.status === "interrupted" && active)
     throw new Refusal("run_external_unknown", { shell, active });
+  const error = shell.session?.status === "error" || active?.status === "error";
   const turn = shell.session?.activeTurnId ?? shell.latestTurn?.turnId ?? null;
   const running =
     shell.latestTurn?.state === "running" ||
@@ -40,7 +37,21 @@ export function readManagedThread(
     provider: shell.session?.providerName ?? shell.modelSelection.provider,
     turn,
     running,
-    blocked: shell.hasPendingApprovals === true || shell.hasPendingUserInput === true,
+    blocked:
+      shell.hasPendingApprovals === true ||
+      shell.hasPendingUserInput === true ||
+      shell.hasActionableProposedPlan === true,
+    ...(error
+      ? {
+          error: {
+            providerPresent: active !== undefined,
+            activeTurn:
+              shell.session?.activeTurnId ??
+              active?.activeTurnId ??
+              (shell.latestTurn?.state === "running" ? shell.latestTurn.turnId : null),
+          },
+        }
+      : {}),
     // An interrupted thread with no provider runtime cannot complete a run,
     // but the gate can stop/archive it through the same locked reclaim path.
     stopped:

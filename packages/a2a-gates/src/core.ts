@@ -63,6 +63,7 @@ export interface GateRuntime {
     stopped: boolean;
     archived: boolean;
     blocked?: boolean;
+    error?: { providerPresent: boolean; activeTurn: string | null };
   }>;
   stopThread(thread: string): Promise<void>;
   archiveThread(thread: string): Promise<void>;
@@ -517,6 +518,17 @@ export class A2AGates {
       { attempt, live },
     );
   }
+  private checkErrorReclaim(live: Awaited<ReturnType<GateRuntime["readThread"]>>) {
+    requireGate(
+      !live.error ||
+        (live.error.providerPresent === false &&
+          live.error.activeTurn === null &&
+          live.running === false &&
+          live.blocked === false),
+      "run_external_unknown",
+      live,
+    );
+  }
   private async observeRun(run: A2ARun) {
     this.checkHumanInputObserver();
     const attempt = this.current(this.load(run.task_id), run.attempt_id!);
@@ -530,6 +542,7 @@ export class A2AGates {
     }
     this.current(this.load(run.task_id), run.attempt_id!);
     this.checkThread(attempt, live);
+    requireGate(!live.error, "run_external_unknown", live);
     requireGate(!live.blocked, "run_blocked", live);
     requireGate(!live.archived && !live.stopped, "run_external_unknown", live);
     if (!attempt.turn_id && live.turn) {
@@ -561,6 +574,7 @@ export class A2AGates {
       if (attempt.reclaimed) return;
       const live = await this.runtime!.readThread(attempt.thread_id);
       this.checkThread(attempt, live);
+      requireGate(!live.error, "run_external_unknown", live);
       requireGate(!live.blocked, "run_blocked", live);
       if (!live.running) return;
       requireGate(performance.now() < deadline, "run_reclaim_deadline", live);
@@ -851,6 +865,7 @@ export class A2AGates {
           live.workspace === task.repo && live.provider === attachment.modelSelection.provider,
           "identity_conflict",
         );
+        this.checkErrorReclaim(live);
         requireGate(!live.blocked, "run_blocked", live);
         requireGate(!live.running, "worker_working");
         this.event(taskId, "attachment_reclaim_intent", { attachment, live }, null);
@@ -1025,7 +1040,8 @@ export class A2AGates {
           await caller.assertActive();
           const live = await this.runtime.readThread(attempt.thread_id);
           requireGate(
-            live.workspace === attempt.workspace &&
+            !live.error &&
+              live.workspace === attempt.workspace &&
               live.provider === "codex" &&
               live.running &&
               !live.blocked &&
@@ -1256,6 +1272,7 @@ export class A2AGates {
         "identity_conflict",
       );
       this.checkThread(attempt, live);
+      this.checkErrorReclaim(live);
       requireGate(!live.blocked, "run_blocked", live);
       requireGate(!live.running, "worker_working");
       this.event(taskId, "reclaim_intent", { attempt, live }, attempt.attempt_id);

@@ -41,6 +41,6 @@ Codex 沿用 Synara 的正常 CODEX_HOME overlay：启动器保留用户 HOME �
 ./a2a/scripts/gate '{"command":"reclaim","task":"TASK_ID","thread":"ATTACHED_THREAD_ID"}'
 ```
 
-`instructions` 是 UTF-8 指令文件。attach 返回 `attachment`，不产生交付 attempt，不授予 submit、验收或集成权限；其指令经 Synara 原生 turn 发送。worker 回收仍传 `attempt`，普通会话回收传 `thread`，不能同时传两者。回收必须经原生运行身份、空闲、停止与归档读回；记录为 error 的原生会话仍按既有门禁保护拒绝。回收成功后保留 membership 和事件历史，任务窗口显示“已结束”。“会话归属”保留为人工修正入口，与门禁共用任务操作锁及 revision CAS。
+`instructions` 是 UTF-8 指令文件。attach 返回 `attachment`，不产生交付 attempt，不授予 submit、验收或集成权限；其指令经 Synara 原生 turn 发送。worker 回收仍传 `attempt`，普通会话回收传 `thread`，不能同时传两者。回收必须经原生运行身份、空闲、停止与归档读回。error 会话只有在核对没有 provider 实例、没有活跃 turn、没有待批准/待回答/待处理计划交互时才可受控回收；身份不符或任一条件未知仍拒绝。run 的观察与等待收尾遇到 error 仍返回非成功，不能据此验收或集成。回收成功后保留 membership 和事件历史，任务窗口显示“已结束”。“会话归属”保留为人工修正入口，与门禁共用任务操作锁及 revision CAS。
 
 endpoint 由桌面主进程在后端启动时原子写入，权限为 0600，保存当前本机 HTTP 地址及桌面生成的随机 backend auth token。token 每次桌面运行重新生成；后端重启时地址重新发布，token 沿用该次桌面运行；后端退出时删除 endpoint。它是 Synara 本机 owner 凭据，泄露后可操作本次后端的门禁和其他 owner 接口，并非只读或仅限门禁。不要把 endpoint、token、带认证的 URL 或环境转储加入 Git、报告或共享日志。桌面退出后旧 token 随旧后端失效；异常退出残留的 endpoint 不能通过启动器的进程身份核对。
