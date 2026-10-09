@@ -107,6 +107,7 @@ import {
 import { useProjectRunStore } from "../projectRunStore";
 import { dockTerminalThreadId } from "../lib/dockTerminalScope";
 import { TaskCompletionNotifications } from "../notifications/taskCompletion";
+import { IssueNotifications } from "../a2a/IssueNotifications";
 import { useWorkspacePathsStore } from "../workspacePathsStore";
 import {
   isThreadDetailRetained,
@@ -357,6 +358,7 @@ function RootRouteView() {
           <GlobalFeedbackDialog />
           <GlobalWhatsNewSurface />
           <TaskCompletionNotifications />
+          <IssueNotifications />
           <QueuedComposerDrainCoordinator />
           {/* Beta welcome must resolve the first-run gate even while Safari is queued. */}
           <BetaWelcomeDialog />

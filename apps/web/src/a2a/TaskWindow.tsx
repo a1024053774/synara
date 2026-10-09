@@ -20,6 +20,8 @@ import { requestA2A } from "./api";
 import { useGateTask } from "./useGateTask";
 import { InterventionMarks } from "./InterventionMarks";
 import { IssuePanel } from "./IssuePanel";
+import { IssueBadge } from "./IssueBadge";
+import { membershipQueryOptions } from "./useIssues";
 import type { Project } from "../types";
 
 const selectThreadShells = createThreadShellsSelector();
@@ -123,22 +125,10 @@ export function TaskWindow() {
   const [selected, setSelected] = useState<string | null>(null);
   const [creating, setCreating] = useState<Project | null>(null);
   const [editing, setEditing] = useState(false);
+  const [issueSummary, setIssueSummary] = useState(false);
   const [focused, setFocused] = useState<ThreadId | null>(null);
   const queryClient = useQueryClient();
-  const query = useQuery({
-    queryKey: ["a2a-memberships"],
-    retry: false,
-    queryFn: async ({ signal }) => {
-      const result = await requestA2A<A2AMembershipResult>(
-        "/api/a2a/membership",
-        undefined,
-        signal,
-      );
-      if (!result.ok || !result.tasks) throw new Error(result.error ?? "归属读取失败");
-      return result.tasks;
-    },
-    refetchInterval: 1000,
-  });
+  const query = useQuery(membershipQueryOptions);
   const task = query.error
     ? undefined
     : (query.data?.find((task) => task.taskId === selected) ?? query.data?.[0]);
@@ -179,6 +169,7 @@ export function TaskWindow() {
                 <h2 className="truncate text-ui-sm font-medium" title={project.name}>
                   {project.name}
                 </h2>
+                <IssueBadge project={project.id} />
                 <Button
                   size="xs"
                   variant="ghost"
@@ -239,6 +230,14 @@ export function TaskWindow() {
                     <Button size="sm" variant="outline" onClick={() => setEditing(!editing)}>
                       会话归属
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      aria-pressed={issueSummary}
+                      onClick={() => setIssueSummary(!issueSummary)}
+                    >
+                      问题汇总
+                    </Button>
                   </div>
                 </div>
                 {gate.error ? (
@@ -282,7 +281,11 @@ export function TaskWindow() {
                   onClose={() => setEditing(false)}
                 />
               )}
-              {task.members.length ? (
+              {issueSummary ? (
+                <section className="flex min-h-0 flex-1 flex-col">
+                  <IssuePanel key={`summary:${task.taskId}`} task={task.taskId} />
+                </section>
+              ) : task.members.length ? (
                 <div className="flex min-h-0 flex-1 snap-x snap-proximity overflow-x-auto">
                   {task.members.map((member) => {
                     const thread = threads.find((thread) => thread.id === member.threadId);
@@ -313,6 +316,7 @@ export function TaskWindow() {
                           )}
                         >
                           <Badge variant="outline">{member.role}</Badge>
+                          <IssueBadge thread={member.threadId} />
                           {member.endedAt && (
                             <Badge variant="outline" title={member.endedAt}>
                               已结束

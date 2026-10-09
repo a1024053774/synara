@@ -1538,7 +1538,9 @@ export const makeAgentGateway = Effect.gen(function* () {
   });
 
   const tools: ReadonlyArray<ToolEntry> = [
-    ...(a2aGates ? [a2aSubmitTool(a2aGates), a2aRaiseTool(a2aGates)] : []),
+    ...(a2aGates
+      ? [a2aSubmitTool(a2aGates), a2aRaiseTool(a2aGates), a2aDispositionTool(a2aGates)]
+      : []),
     ...readTools,
     ...diagnosticTools,
     createThreads,
@@ -1606,4 +1608,4 @@ export const makeAgentGateway = Effect.gen(function* () {
 
 export const AgentGatewayLive = Layer.effect(AgentGateway, makeAgentGateway);
 import { A2AGateService } from "../../a2a/service";
-import { a2aRaiseTool, a2aSubmitTool } from "../../a2a/tools";
+import { a2aDispositionTool, a2aRaiseTool, a2aSubmitTool } from "../../a2a/tools";

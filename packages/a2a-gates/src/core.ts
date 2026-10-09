@@ -87,6 +87,7 @@ export class A2AGates {
   constructor(
     readonly root: string,
     private readonly runtime?: GateRuntime,
+    private readonly now: () => number = Date.now,
   ) {
     requireGate(isAbsolute(root), "invalid_path");
     mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -100,7 +101,7 @@ export class A2AGates {
       CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS human_inputs (event_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS issue_records (id TEXT PRIMARY KEY, task TEXT NOT NULL, thread TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS user_inputs (id TEXT PRIMARY KEY, task TEXT NOT NULL, message TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_inputs (id TEXT PRIMARY KEY, task TEXT NOT NULL, message TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS issue_records_no_update BEFORE UPDATE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS issue_records_no_delete BEFORE DELETE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS user_inputs_no_update BEFORE UPDATE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;
@@ -108,6 +109,34 @@ export class A2AGates {
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, task TEXT NOT NULL, attempt TEXT, type TEXT NOT NULL, details TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;`);
+    // T-055 registered one input per message. A reply bundle has one message
+    // and several immutable inputs. Preserve every legacy row byte-for-byte
+    // while removing only the obsolete message uniqueness constraint.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const messageUnique = this.db
+        .prepare("PRAGMA index_list(user_inputs)")
+        .all()
+        .some((index) => {
+          const columns = this.db
+            .prepare(`PRAGMA index_info('${String(index.name).replaceAll("'", "''")}')`)
+            .all();
+          return index.unique === 1 && columns.length === 1 && columns[0]!.name === "message";
+        });
+      if (messageUnique)
+        this.db.exec(`
+        CREATE TABLE user_inputs_bundle (id TEXT PRIMARY KEY, task TEXT NOT NULL, message TEXT NOT NULL, data TEXT NOT NULL);
+        INSERT INTO user_inputs_bundle SELECT id,task,message,data FROM user_inputs ORDER BY rowid;
+        DROP TABLE user_inputs;
+        ALTER TABLE user_inputs_bundle RENAME TO user_inputs;
+        CREATE TRIGGER user_inputs_no_update BEFORE UPDATE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;
+        CREATE TRIGGER user_inputs_no_delete BEFORE DELETE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;`);
+      this.db.exec(
+        "CREATE INDEX IF NOT EXISTS user_inputs_message ON user_inputs(message); COMMIT",
+      );
+    } finally {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+    }
     if (
       !this.db
         .prepare("PRAGMA table_info(events)")
@@ -363,19 +392,37 @@ export class A2AGates {
       .filter((record) => record.kind === "issue")
       .map((issue) => {
         const chain = records.filter((record) => record.issue_id === issue.id);
-        const answer = chain.find((record) => record.kind === "answer");
+        const requested = chain.findLastIndex(
+          (record) => record.action === "reopen" || record.action === "needs-user",
+        );
+        const answer = chain.slice(requested + 1).findLast((record) => record.kind === "answer");
+        const disposition = chain.findLast((record) => record.kind === "disposition");
         const last = chain.at(-1)!;
-        const state =
-          last.action === "delivered"
-            ? "已送达"
-            : last.action === "forward"
-              ? "已转交"
-              : answer
-                ? "已答复"
-                : issue.blocking || Date.now() - Date.parse(issue.created_at) >= 900_000
-                  ? "等你决定"
-                  : "待判断";
-        return { issue, state, ...(answer ? { answer } : {}) };
+        const elapsed = Math.max(0, this.now() - Date.parse(last.created_at));
+        const state: A2AIssueView["state"] =
+          last.kind === "answer"
+            ? "已答复"
+            : last.action === "delivered"
+              ? "已送达"
+              : last.action === "close" || last.action === "dismiss"
+                ? "已关闭"
+                : last.action === "forward"
+                  ? elapsed < 900_000
+                    ? "已转交"
+                    : "等你决定"
+                  : last.action === "snooze"
+                    ? elapsed < 3_600_000
+                      ? "稍后"
+                      : "等你决定"
+                    : last.kind === "disposition" || issue.blocking || elapsed >= 900_000
+                      ? "等你决定"
+                      : "待判断";
+        return {
+          issue,
+          state,
+          ...(answer ? { answer } : {}),
+          ...(disposition ? { disposition } : {}),
+        };
       });
     const user_inputs = this.db
       .prepare("SELECT data FROM user_inputs WHERE task=? ORDER BY rowid")
@@ -437,7 +484,7 @@ export class A2AGates {
           `turn:${caller.turn}`,
           ...input.refs,
         ],
-        created_at: new Date().toISOString(),
+        created_at: new Date(this.now()).toISOString(),
         body: input.body,
         task_id: task.task_id,
         attempt_id: attempt.attempt_id,
@@ -460,111 +507,244 @@ export class A2AGates {
       lock.close();
     }
   }
-  private async answerIssue(args: A2AGateRequest): Promise<A2AGateResult> {
-    const issue = this.readIssues(args.task).issues.find(
-      (view) => view.issue.id === args.issue,
-    )?.issue;
-    requireGate(issue, "unknown_issue");
-    requireGate(typeof args.answer === "string" && args.answer.trim().length > 0, "invalid_answer");
+  private disposeIssue(args: A2AGateRequest, caller?: SubmitCaller): A2AGateResult {
+    const view = this.readIssues(args.task).issues.find((entry) => entry.issue.id === args.issue);
+    requireGate(view, "unknown_issue");
+    requireGate(args.action, "invalid_action");
+    if (args.action === "dismiss" || args.action === "snooze" || args.action === "reopen")
+      requireGate(!caller, "user_required");
+    if (args.action === "close") {
+      requireGate(!view.issue.blocking || !caller, "blocking_requires_user");
+      requireGate(args.reason?.trim() && args.basis?.trim(), "close_requires_reason_basis");
+    }
+    if (args.action === "delivered")
+      requireGate(
+        view.answer?.input_id &&
+          view.answer.message_id &&
+          view.answer.bundle_id &&
+          this.readIssues(args.task).records.some(
+            (record) =>
+              record.issue_id === view.issue.id &&
+              record.action === "delivered" &&
+              record.message_id === view.answer!.message_id,
+          ),
+        "delivery_unconfirmed",
+      );
+    this.appendIssue({
+      ...view.issue,
+      id: randomUUID(),
+      kind: "disposition",
+      action: args.action,
+      from: caller ? `controller:${caller.thread}` : "user",
+      to:
+        args.action === "forward"
+          ? "ideation"
+          : args.action === "needs-user" || args.action === "reopen"
+            ? "user"
+            : "triage",
+      reply_to: view.issue.id,
+      body: args.reason ?? (args.action === "dismiss" ? "用户选择不处理" : ""),
+      ...(args.reason !== undefined || args.action === "dismiss"
+        ? { reason: args.reason ?? "用户选择不处理" }
+        : {}),
+      ...(args.basis !== undefined || args.action === "dismiss"
+        ? { basis: args.basis ?? "用户直接选择不处理" }
+        : {}),
+      ...(args.action === "delivered"
+        ? {
+            input_id: view.answer!.input_id!,
+            message_id: view.answer!.message_id!,
+            bundle_id: view.answer!.bundle_id!,
+          }
+        : {}),
+      created_at: new Date(this.now()).toISOString(),
+      refs: [
+        ...view.issue.refs,
+        `issue:${view.issue.id}`,
+        ...(caller ? [`actor-thread:${caller.thread}`] : []),
+      ],
+    });
+    return { ok: true, ...this.readIssues(args.task) };
+  }
+  private async answerIssues(args: A2AGateRequest): Promise<A2AGateResult> {
+    const replies =
+      args.command === "answer_issue" ? [{ issue: args.issue, answer: args.answer }] : args.answers;
     requireGate(
-      !this.readIssues(args.task).records.some(
-        (record) => record.issue_id === issue.id && record.kind === "answer",
-      ),
-      "issue_answered",
+      replies?.length && new Set(replies.map((reply) => reply.issue)).size === replies.length,
+      "invalid_answers",
     );
+    const { issues } = this.readIssues(args.task);
+    const rows = replies.map((reply) => {
+      const view = issues.find((view) => view.issue.id === reply.issue);
+      requireGate(view, "unknown_issue");
+      requireGate(view.state !== "已关闭", "issue_closed");
+      requireGate(!view.answer, "issue_answered");
+      requireGate(
+        typeof reply.answer === "string" && reply.answer.trim().length > 0,
+        "invalid_answer",
+      );
+      return { issue: view.issue, answer: reply.answer.trimEnd() };
+    });
     requireGate(this.runtime?.sendUserAnswer, "native_runtime_required");
-    const answer = args.answer.trimEnd();
-    const bodyChars = Array.from(issue.body);
-    const body = bodyChars.length > 600 ? bodyChars.slice(0, 599).join("") + "…" : issue.body;
-    const message = `问题 ${issue.number}：${issue.title}\n${body ? body + "\n" : ""}用户答复：${answer}`;
-    const inputId = randomUUID(),
-      messageId = randomUUID(),
-      bundleId = randomUUID();
-    const createdAt = new Date().toISOString();
-    const input: A2AUserInput = {
-      id: inputId,
-      schema: 1,
-      form: "answer",
-      text: answer,
-      target: {
-        task: issue.task_id,
-        attempt: issue.attempt_id,
-        thread: issue.thread_id,
-        turn: null,
-        message: messageId,
-      },
-      channel: "issue-panel",
-      reply_to: issue.id,
-      source_ref: { message_id: messageId },
-      certainty: "observed",
-      created_at: createdAt,
-      bundle_id: bundleId,
-      question: { number: issue.number, title: issue.title, body: issue.body },
-    };
-    const record: A2AIssueRecord = {
-      ...issue,
-      id: inputId,
-      kind: "answer",
-      from: "user",
-      to: issue.from,
-      reply_to: issue.id,
-      created_at: createdAt,
-      body: answer,
-      input_id: inputId,
-      message_id: messageId,
-      bundle_id: bundleId,
-      refs: [...issue.refs, `issue:${issue.id}`, `input:${inputId}`, `message:${messageId}`],
-    };
+    const grouped = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const key = args.mode === "individual" ? row.issue.id : row.issue.thread_id;
+      grouped.set(key, [...(grouped.get(key) ?? []), row]);
+    }
+    const noticeThreads = new Set<string>();
+    const groups = [...grouped.values()].map((replies) => {
+      const thread = replies[0]!.issue.thread_id;
+      const notices = noticeThreads.has(thread)
+        ? []
+        : this.readIssues(args.task, thread).issues.filter(
+            (view) =>
+              view.state === "已关闭" &&
+              view.disposition &&
+              !this.db
+                .prepare(
+                  "SELECT 1 FROM events WHERE task=? AND type='issue_closure_notified' AND json_extract(details,'$.close_id')=?",
+                )
+                .get(args.task, view.disposition.id),
+          );
+      noticeThreads.add(thread);
+      const text = replies
+        .map(({ issue, answer }) => {
+          const chars = Array.from(issue.body);
+          const body = chars.length > 600 ? chars.slice(0, 599).join("") + "…" : issue.body;
+          return `问题 ${issue.number}：${issue.title}\n${body ? body + "\n" : ""}用户答复：${answer}`;
+        })
+        .join("\n\n");
+      return {
+        replies,
+        thread,
+        messageId: randomUUID(),
+        bundleId: randomUUID(),
+        notices,
+        message:
+          text +
+          notices
+            .map(
+              (view) =>
+                `\n\n（另：你上报的问题 ${view.issue.number} 已被关闭，理由：${view.disposition!.reason ?? view.disposition!.body}。如不同意，请重新上报并补充证据。）`,
+            )
+            .join(""),
+        answers: [] as A2AIssueRecord[],
+      };
+    });
+    const createdAt = new Date(this.now()).toISOString();
     // Input, answer, message registration and derived intervention are atomic.
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const sequence = this.appendIssue(record);
-      // The panel RPC's authoritative domain record precedes dispatch. Its
-      // stable UUID and gate sequence identify the observed answer source.
-      input.source_ref = { message_id: messageId, event_id: record.id, source_sequence: sequence };
-      this.saveUserInput(input);
-      this.event(
-        issue.task_id,
-        "human_intervention",
-        {
-          input_id: inputId,
-          event_id: inputId,
-          task_id: issue.task_id,
-          attempt_id: issue.attempt_id,
-          thread_id: issue.thread_id,
-          message_id: messageId,
-          dispatch_origin: "user",
-          text: message,
-        },
-        issue.attempt_id,
-      );
+      for (const group of groups)
+        for (const { issue, answer } of group.replies) {
+          const inputId = randomUUID();
+          const record: A2AIssueRecord = {
+            ...issue,
+            id: inputId,
+            kind: "answer",
+            from: "user",
+            to: issue.from,
+            reply_to: issue.id,
+            created_at: createdAt,
+            body: answer,
+            input_id: inputId,
+            message_id: group.messageId,
+            bundle_id: group.bundleId,
+            refs: [
+              ...issue.refs,
+              `issue:${issue.id}`,
+              `input:${inputId}`,
+              `message:${group.messageId}`,
+            ],
+          };
+          const sequence = this.appendIssue(record);
+          this.saveUserInput({
+            id: inputId,
+            schema: 1,
+            form: "answer",
+            text: answer,
+            target: {
+              task: issue.task_id,
+              attempt: issue.attempt_id,
+              thread: issue.thread_id,
+              turn: null,
+              message: group.messageId,
+            },
+            channel: "issue-panel",
+            reply_to: issue.id,
+            source_ref: {
+              message_id: group.messageId,
+              event_id: record.id,
+              source_sequence: sequence,
+            },
+            certainty: "observed",
+            created_at: createdAt,
+            bundle_id: group.bundleId,
+            question: { number: issue.number, title: issue.title, body: issue.body },
+          });
+          this.event(
+            issue.task_id,
+            "human_intervention",
+            {
+              input_id: inputId,
+              event_id: inputId,
+              task_id: issue.task_id,
+              attempt_id: issue.attempt_id,
+              thread_id: issue.thread_id,
+              message_id: group.messageId,
+              dispatch_origin: "user",
+              text: group.message,
+            },
+            issue.attempt_id,
+          );
+          group.answers.push(record);
+        }
       this.db.exec("COMMIT");
     } finally {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
-    const current = this.load(args.task).current_attempt;
-    let action: "delivered" | "forward" = "forward";
-    if (current && current.attempt_id === issue.attempt_id && !current.reclaimed) {
-      try {
-        await this.runtime.sendUserAnswer(issue.thread_id, messageId, message);
-        action = "delivered";
-      } catch (error) {
-        // A native archive can precede gate reclaim. Only its explicit terminal
-        // receipt permits forwarding; unknown delivery failures stay errors.
-        if (!(error instanceof Refusal) || error.code !== "session_ended") throw error;
+    for (const group of groups) {
+      const current = this.load(args.task).current_attempt;
+      let action: "delivered" | "forward" = "forward";
+      if (
+        current &&
+        current.attempt_id === group.replies[0]!.issue.attempt_id &&
+        !current.reclaimed
+      ) {
+        try {
+          await this.runtime.sendUserAnswer(group.thread, group.messageId, group.message);
+          action = "delivered";
+          for (const view of group.notices)
+            this.event(
+              args.task,
+              "issue_closure_notified",
+              {
+                close_id: view.disposition!.id,
+                issue_id: view.issue.id,
+                message_id: group.messageId,
+              },
+              view.issue.attempt_id,
+            );
+        } catch (error) {
+          // Only an explicit terminal receipt permits forwarding. Unknown
+          // delivery failures preserve the answer and remain errors.
+          if (!(error instanceof Refusal) || error.code !== "session_ended") throw error;
+        }
       }
+      for (const record of group.answers)
+        this.appendIssue({
+          ...record,
+          id: randomUUID(),
+          kind: "disposition",
+          from: "system",
+          to: action === "forward" ? "executor" : record.to,
+          reply_to: record.id,
+          body: action === "forward" ? "session-ended" : "",
+          ...(action === "forward" ? { reason: "session-ended" } : {}),
+          action,
+          created_at: new Date(this.now()).toISOString(),
+        });
     }
-    this.appendIssue({
-      ...record,
-      id: randomUUID(),
-      kind: "disposition",
-      from: "system",
-      to: action === "forward" ? "executor" : record.to,
-      reply_to: record.id,
-      body: action === "forward" ? "session-ended" : "",
-      action,
-      created_at: new Date().toISOString(),
-    });
     return { ok: true, ...this.readIssues(args.task) };
   }
   private event(task: string, type: string, details: unknown, expectedAttempt?: string | null) {
@@ -1037,17 +1217,42 @@ export class A2AGates {
           })),
         };
       }
-      if (caller)
-        requireGate(
-          args.command === "submit" && this.taskForThread(caller.thread)?.task_id === taskId,
-          "stale_thread",
-        );
+      if (caller) {
+        if (args.command !== "disposition")
+          requireGate(
+            args.command === "submit" && this.taskForThread(caller.thread)?.task_id === taskId,
+            "stale_thread",
+          );
+      }
       this.checkHumanInputObserver();
       if (args.command === "run") return await this.run(args);
       // A separate SQLite write transaction is the OS-released task operation lock.
       // Keep the inode, never unlink it. Main-state reads remain available during an oracle.
       lock = this.operationLock(taskId);
-      if (args.command === "answer_issue") return await this.answerIssue(args);
+      if (args.command === "disposition") {
+        if (caller) {
+          const member = this.membership
+            .list()
+            .find((entry) => entry.taskId === taskId)
+            ?.members.find((entry) => entry.threadId === caller.thread);
+          requireGate(member?.role === "controller" && !member.endedAt, "controller_required");
+          await caller.assertActive();
+          requireGate(this.runtime, "native_runtime_required");
+          const live = await this.runtime.readThread(caller.thread);
+          requireGate(
+            !live.error &&
+              !live.archived &&
+              !live.blocked &&
+              live.running &&
+              live.turn === caller.turn,
+            "identity_conflict",
+          );
+          await caller.assertActive();
+        }
+        return this.disposeIssue(args, caller);
+      }
+      if (args.command === "answer_issue" || args.command === "answer_issues")
+        return await this.answerIssues(args);
       if (args.command === "create") {
         requireGate(!this.db.prepare("SELECT 1 FROM tasks WHERE id=?").get(taskId), "task_exists");
         const repo = inputPath(args.repo, true),

@@ -151,4 +151,19 @@ describe("a2a_raise native approval contract", () => {
     expect(isSynaraGatewayToolName("mcp__other__a2a_raise")).toBe(false);
     expect(isSynaraGatewayToolName("mcp__synara__a2a_raise_extra")).toBe(false);
   });
+  it.each(["approval-required", "full-access"])(
+    "keeps a2a_disposition on the interactive path in %s mode",
+    async (mode) => {
+      const f = fixture();
+      f.context.session.runtimeMode = mode;
+      f.context.autoApproveSynaraTools = true;
+      f.params._meta.tool_name = "a2a_disposition";
+      f.params.message = 'Allow the synara MCP server to run tool "a2a_disposition"?';
+      await f.invoke();
+      expect(f.write).not.toHaveBeenCalled();
+      expect(f.context.pendingApprovals.size).toBe(1);
+      expect(isSynaraGatewayToolName("a2a_disposition")).toBe(false);
+      expect(isSynaraGatewayToolName("mcp__synara__a2a_disposition")).toBe(false);
+    },
+  );
 });

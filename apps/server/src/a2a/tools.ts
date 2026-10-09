@@ -1,4 +1,4 @@
-import { A2AGateRequest } from "@synara/contracts";
+import { A2AGateRequest, A2AIssueAction } from "@synara/contracts";
 import type { A2AGates } from "@synara/a2a-gates";
 import { Effect, Schema } from "effect";
 import { mcpToolResultJson } from "../agentGateway/protocol";
@@ -102,6 +102,67 @@ export function a2aRaiseTool(gates: A2AGates): ToolEntry {
         Effect.catch((error) =>
           Effect.succeed({
             ...mcpToolResultJson({ ok: false, error: "issue_refused", details: String(error) }),
+            isError: true as const,
+          }),
+        ),
+      ),
+  };
+}
+
+export function a2aDispositionTool(gates: A2AGates): ToolEntry {
+  const input = Schema.Struct({
+    task: Schema.String,
+    issue: Schema.String,
+    action: A2AIssueAction,
+    reason: Schema.optional(Schema.String),
+    basis: Schema.optional(Schema.String),
+  });
+  return {
+    definition: {
+      name: "a2a_disposition",
+      description:
+        "Append one disposition record for an issue in your task. Only a controller session can use this tool. The credential supplies your identity. An active turn is required.\n\nFor close, supply reason and basis. You cannot close a blocking issue or send a user answer. Only the user can reopen, snooze, or dismiss an issue.",
+      annotations: WRITE_TOOL_ANNOTATIONS,
+      inputSchema: {
+        type: "object",
+        required: ["task", "issue", "action"],
+        properties: {
+          task: { type: "string" },
+          issue: { type: "string" },
+          action: {
+            type: "string",
+            enum: ["close", "needs-user", "forward", "reopen", "snooze", "dismiss", "delivered"],
+          },
+          reason: { type: "string" },
+          basis: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+    requiredCapability: "thread:write",
+    requiresActiveTurn: true,
+    handler: (args, context) =>
+      Effect.gen(function* () {
+        const decoded = yield* Schema.decodeUnknownEffect(input)(args);
+        const result = yield* Effect.promise(() =>
+          gates.call(
+            { ...decoded, command: "disposition" },
+            {
+              thread: context.callerThreadId,
+              turn: context.callerTurnId ?? "",
+              assertActive: () => Effect.runPromise(context.assertCallerTurnActive()),
+            },
+          ),
+        );
+        return { ...mcpToolResultJson(result), ...(!result.ok ? { isError: true as const } : {}) };
+      }).pipe(
+        Effect.catchTag("SchemaError", (error) =>
+          Effect.succeed({
+            ...mcpToolResultJson({
+              ok: false,
+              error: "invalid_disposition",
+              details: String(error),
+            }),
             isError: true as const,
           }),
         ),

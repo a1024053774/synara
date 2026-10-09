@@ -18,6 +18,8 @@ const commands: Record<string, { required: string[]; optional?: string[] }> = {
   events: { required: [] },
   issues: { required: [], optional: ["thread"] },
   answer_issue: { required: ["issue", "answer"] },
+  answer_issues: { required: ["answers"], optional: ["mode"] },
+  disposition: { required: ["issue", "action"], optional: ["reason", "basis"] },
   reclaim: { required: [], optional: ["attempt", "thread"] },
 };
 
@@ -83,6 +85,10 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
       "commit",
       "issue",
       "answer",
+      "answers",
+      "mode",
+      "action",
+      "basis",
     ];
     const { values, positionals } = parseArgs({
       args: argv,
@@ -112,6 +118,7 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
           throw new Error("integer required: " + key);
         request[key.replaceAll("-", "_")] = Number(value);
       } else if (key === "model-selection") request.modelSelection = JSON.parse(value!);
+      else if (key === "answers") request.answers = JSON.parse(value!);
       else request[key === "runtime-mode" ? "runtimeMode" : key] = value;
     }
   } catch (error) {

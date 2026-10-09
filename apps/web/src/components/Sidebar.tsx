@@ -255,6 +255,7 @@ import {
 import { AppRailMoreMenu } from "./AppRailMoreMenu";
 import { AppRailUsage } from "./AppRailUsage";
 import { ProjectSidebarIcon } from "./ProjectSidebarIcon";
+import { IssueBadge } from "../a2a/IssueBadge";
 import { ThreadHoverCardContent } from "./ThreadHoverCardContent";
 import { ProjectHoverCardContent } from "./ProjectHoverCardContent";
 import {
@@ -5786,6 +5787,7 @@ export default function Sidebar() {
                 )}
               >
                 <span className={SIDEBAR_PROJECT_NAME_CLASS_NAME}>{projectRowLabel}</span>
+                <IssueBadge project={project.id} />
               </div>
               {/* Closed folders surface child-chat status on the project row; open
                   folders leave that signal to their visible child thread rows. */}

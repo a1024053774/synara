@@ -2,6 +2,17 @@ import { Schema } from "effect";
 import { ModelSelection } from "./orchestration";
 import { A2AMemberRole } from "./a2aMembership";
 
+export const A2AIssueAction = Schema.Literals([
+  "close",
+  "needs-user",
+  "forward",
+  "reopen",
+  "snooze",
+  "dismiss",
+  "delivered",
+]);
+export type A2AIssueAction = typeof A2AIssueAction.Type;
+
 export const A2AGateRequest = Schema.Struct({
   command: Schema.Literals([
     "create",
@@ -19,6 +30,8 @@ export const A2AGateRequest = Schema.Struct({
     "events",
     "issues",
     "answer_issue",
+    "answer_issues",
+    "disposition",
   ]),
   task: Schema.String,
   repo: Schema.optional(Schema.String),
@@ -41,6 +54,12 @@ export const A2AGateRequest = Schema.Struct({
   runtimeMode: Schema.optional(Schema.Literals(["approval-required", "full-access"])),
   issue: Schema.optional(Schema.String),
   answer: Schema.optional(Schema.String),
+  answers: Schema.optional(
+    Schema.Array(Schema.Struct({ issue: Schema.String, answer: Schema.String })),
+  ),
+  mode: Schema.optional(Schema.Literals(["bundle", "individual"])),
+  action: Schema.optional(A2AIssueAction),
+  basis: Schema.optional(Schema.String),
 });
 export type A2AGateRequest = typeof A2AGateRequest.Type;
 
@@ -194,13 +213,16 @@ export interface A2AIssueRecord {
   input_id?: string;
   message_id?: string;
   bundle_id?: string;
-  action?: "delivered" | "forward";
+  action?: A2AIssueAction;
+  reason?: string;
+  basis?: string;
 }
 
 export interface A2AIssueView {
   issue: A2AIssueRecord;
-  state: "待判断" | "等你决定" | "已答复" | "已送达" | "已转交";
+  state: "待判断" | "等你决定" | "已答复" | "已送达" | "已转交" | "已关闭" | "稍后";
   answer?: A2AIssueRecord;
+  disposition?: A2AIssueRecord;
 }
 
 export interface A2AUserInput {
