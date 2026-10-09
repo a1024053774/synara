@@ -13,10 +13,14 @@ def data_directory():
     return Path(os.environ.get("A2A_WORKBENCH_DATA_DIR", str(DEFAULT_DATA))).expanduser().resolve()
 
 
-def process_identity(pid):
+def process_identity(pid, time_locale="C", ctype_locale="C"):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LC_")}
+    env.update(LANG="C", LC_TIME=time_locale, LC_CTYPE=ctype_locale)
     result = subprocess.run(
         ["ps", "-p", str(pid), "-o", "lstart=", "-o", "command="],
-        capture_output=True, text=True, check=True,
+        env=env,
+        # Match the launcher's UTF-8 decoding, including legacy non-UTF-8 locales.
+        capture_output=True, encoding="utf-8", errors="replace", check=True,
     )
     return result.stdout.strip()
 
@@ -28,8 +32,33 @@ def read_owner(data):
     owner = json.loads(path.read_text(encoding="utf-8"))
     try:
         identity = process_identity(owner["pid"])
+        if identity != owner["identity"]:
+            # Old records inherit LC_TIME and LC_CTYPE independently. Reproduce
+            # their complete ps output, preserving both start time and command.
+            locales = subprocess.run(
+                ["locale", "-a"], env={**os.environ, "LC_ALL": "C"},
+                capture_output=True, encoding="utf-8", check=True,
+            )
+            names = ["C", *(name for name in locales.stdout.splitlines() if name not in ("C", "POSIX"))]
+            seen_commands = set()
+            for ctype_name in names:
+                command = subprocess.run(
+                    ["ps", "-p", str(owner["pid"]), "-o", "command="],
+                    env={**os.environ, "LC_ALL": ctype_name},
+                    capture_output=True, encoding="utf-8", errors="replace", check=True,
+                ).stdout.rstrip()
+                # Equivalent command renderings need only one LC_TIME search;
+                # this avoids checking every locale pair for ASCII commands.
+                if command in seen_commands:
+                    continue
+                seen_commands.add(command)
+                if not command or not owner["identity"].endswith(command):
+                    continue
+                for time_name in names:
+                    if process_identity(owner["pid"], time_name, ctype_name) == owner["identity"]:
+                        return owner
     except subprocess.CalledProcessError as error:
-        if error.returncode == 1 and not error.stdout.strip():
+        if error.cmd[0] == "ps" and error.returncode == 1 and not error.stdout.strip():
             return None
         raise
     if identity != owner["identity"]:
