@@ -1,5 +1,5 @@
 import { A2AGateService } from "./a2a/service";
-import { recordUserCommand, recordQuitResumeInput } from "./a2a/userInput";
+import { recordUserCommand, recordQuitResumeInput, recordReconcileInput } from "./a2a/userInput";
 import { readEventLoopStatus } from "./eventLoopMonitor";
 import { makeGitActionRunner } from "./git/gitActionRunner";
 import { AgentGatewaySessionRegistry } from "./agentGateway/Services/AgentGatewaySessionRegistry";
@@ -1434,7 +1434,7 @@ const makeWsRpcHandlersLayer = () =>
             // written while startup is still claiming the previous quit's record.
             runtimeStartup.enqueueCommand(
               Effect.gen(function* () {
-                yield* recordQuitResumeInput(yield* A2AGateService, input);
+                yield* recordQuitResumeInput(yield* A2AGateService, orchestrationEngine, input);
                 return yield* prepareQuitResume({
                   request: input,
                   recordPath: config.quitResumeStatePath,
@@ -1448,6 +1448,7 @@ const makeWsRpcHandlersLayer = () =>
         [ORCHESTRATION_WS_METHODS.reconcileProviderDelivery]: (input) =>
           rpcEffect(
             Effect.gen(function* () {
+              yield* recordReconcileInput(yield* A2AGateService, orchestrationEngine, input);
               const principal = yield* CurrentManagedAttachmentPrincipal;
               const result = yield* providerCommandReactor.reconcileDelivery({
                 eventSequence: input.eventSequence,

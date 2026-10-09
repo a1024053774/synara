@@ -238,6 +238,7 @@ export interface A2AUserInput {
     turn: string | null;
     message: string | null;
     request?: string | null;
+    eventSequence?: number;
   };
   channel: "thread-message" | "issue-panel" | "ws-rpc" | "ui-derived";
   reply_to: string | null;

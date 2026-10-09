@@ -39,6 +39,8 @@ HTTP、工作台 CLI 与 MCP 共用门禁核心。以下请求可经现有 `a2a/
 
 记录器覆盖受管 worker、attach、普通会话和主控会话。消息按服务端 `dispatchOrigin=user` 的域事件记录；异步问题答复保存问题 id 与答案。审批、结构化答复、停止、中断和归档在 WS RPC 入口记录。退出批量中断、临时线程清理和退出恢复标为 `ui-derived`，不派生人工介入。v1 不判断内容含义。
 
+解除阻塞的 `reconcileProviderDelivery` 也在 WS 入口记录：每个收到的请求一条 action，目标包含 `thread` 与原请求的 `eventSequence`，业务 CAS 拒绝的重复请求仍保留各自的输入记录。工作目录切换触发的停止标 `ui-derived`；退出恢复的项目键从服务端线程快照取得。
+
 `user_input_observer` 对外提供记录器状态。受管 attempt 的记录失败保持门禁 fail-closed；其他范围失败不阻断业务。启动时重放事件日志和已登记的 RPC 来源；来源无法核对的中断区间保存 `form: gap`、序号范围与原因，不推断为用户决定。消息、RPC 与重放按稳定的来源键去重；受管输入与指向 `input_id` 的 `human_intervention` 在同一事务写入。面板答复仍使用其原有登记与去重路径。
 
 旧 `human_inputs` 去重表迁入 `user_input_events`；`user_inputs` 的 task、message 可为空，历史正文和事件保留。迁移在事务中执行，允许中断后重跑；用户输入和 RPC 来源登记为追加式记录。

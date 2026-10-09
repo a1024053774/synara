@@ -4,6 +4,7 @@ import type {
   A2AUserInput,
   OrchestrationCommand,
   OrchestrationPrepareQuitResumeInput,
+  OrchestrationReconcileProviderDeliveryInput,
 } from "@synara/contracts";
 import { Effect } from "effect";
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine";
@@ -54,23 +55,16 @@ export function userCommandInput(
   };
 }
 
-/** Register before admission. A failed input write cannot lose the RPC's source on replay. */
-export const recordUserCommand = Effect.fn("a2a.recordUserCommand")(function* (
+/** The same ingress and failure policy serves all three WS observation points. */
+const persistUserInput = Effect.fn("a2a.persistUserInput")(function* (
   gates: A2AGates,
-  engine: OrchestrationEngineShape,
-  command: OrchestrationCommand,
+  commandId: string,
+  input: A2AUserInput,
 ) {
-  const model = yield* engine.getReadModel();
-  const project =
-    "threadId" in command
-      ? model.threads.find((thread) => thread.id === command.threadId)?.projectId
-      : undefined;
-  const input = userCommandInput(gates, command, project);
-  if (!input) return;
   const result = yield* Effect.try({
     try: () => {
-      gates.registerUserInputCommand(command.commandId, input);
-      gates.appendUserInput(input, `rpc:${command.commandId}`);
+      gates.registerUserInputCommand(commandId, input);
+      gates.appendUserInput(input, `rpc:${commandId}`);
     },
     catch: (error) => error,
   }).pipe(Effect.result);
@@ -82,26 +76,74 @@ export const recordUserCommand = Effect.fn("a2a.recordUserCommand")(function* (
       });
       return yield* Effect.fail(result.failure);
     }
-    gates.deferUserInput(command.commandId, input);
+    gates.deferUserInput(commandId, input);
     yield* Effect.logError("a2a user input recording failed; replay required", {
-      command_id: command.commandId,
+      command_id: commandId,
       reason: String(result.failure),
     });
   }
 });
 
+/** Register before admission so replay retains the RPC observation's source. */
+export const recordUserCommand = Effect.fn("a2a.recordUserCommand")(function* (
+  gates: A2AGates,
+  engine: OrchestrationEngineShape,
+  command: OrchestrationCommand,
+) {
+  const model = yield* engine.getReadModel();
+  const project =
+    "threadId" in command
+      ? model.threads.find((thread) => thread.id === command.threadId)?.projectId
+      : undefined;
+  const input = userCommandInput(gates, command, project);
+  if (input) yield* persistUserInput(gates, command.commandId, input);
+});
+
+export const recordReconcileInput = Effect.fn("a2a.recordReconcileInput")(function* (
+  gates: A2AGates,
+  engine: OrchestrationEngineShape,
+  request: OrchestrationReconcileProviderDeliveryInput,
+) {
+  const model = yield* engine.getReadModel();
+  const project = model.threads.find((thread) => thread.id === request.threadId)?.projectId;
+  // This RPC has no command ID. Each server receipt is a distinct observation,
+  // including a repeated request that the business CAS rejects as stale.
+  const commandId = `reconcile:${randomUUID()}`;
+  yield* persistUserInput(gates, commandId, {
+    id: randomUUID(),
+    schema: 1,
+    form: "action",
+    text: "",
+    target: {
+      ...gates.userInputTarget(request.threadId, project),
+      eventSequence: request.eventSequence,
+    },
+    channel: "ws-rpc",
+    reply_to: null,
+    source_ref: { command_id: commandId, rpc: "orchestration.reconcileProviderDelivery" },
+    content: { type: "orchestration.reconcileProviderDelivery", ...request },
+    certainty: "observed",
+    created_at: new Date().toISOString(),
+  });
+});
+
 export const recordQuitResumeInput = Effect.fn("a2a.recordQuitResumeInput")(function* (
   gates: A2AGates,
+  engine: OrchestrationEngineShape,
   request: OrchestrationPrepareQuitResumeInput,
 ) {
   const id = randomUUID();
+  const model = yield* engine.getReadModel();
   for (const thread of new Set(request.threadIds)) {
     const input: A2AUserInput = {
       id: randomUUID(),
       schema: 1,
       form: "action",
       text: "",
-      target: gates.userInputTarget(thread),
+      target: gates.userInputTarget(
+        thread,
+        model.threads.find((item) => item.id === thread)?.projectId,
+      ),
       channel: "ui-derived",
       reply_to: null,
       source_ref: { command_id: id, rpc: "orchestration.prepareQuitResume" },
@@ -110,25 +152,6 @@ export const recordQuitResumeInput = Effect.fn("a2a.recordQuitResumeInput")(func
       created_at: new Date().toISOString(),
     };
     const commandId = `quit:${id}:${thread}`;
-    const result = yield* Effect.try({
-      try: () => {
-        gates.registerUserInputCommand(commandId, input);
-        gates.appendUserInput(input, `rpc:${commandId}`);
-      },
-      catch: (error) => error,
-    }).pipe(Effect.result);
-    if (result._tag === "Failure") {
-      if (input.target.attempt) {
-        gates.setUserInputObserverStatus("failed", {
-          thread_id: thread,
-          reason: String(result.failure),
-        });
-        return yield* Effect.fail(result.failure);
-      }
-      gates.deferUserInput(commandId, input);
-      yield* Effect.logError("a2a quit resume recording failed", {
-        reason: String(result.failure),
-      });
-    }
+    yield* persistUserInput(gates, commandId, input);
   }
 });

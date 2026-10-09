@@ -341,6 +341,7 @@ export default function BranchToolbar({
           void api.orchestration
             .dispatchCommand({
               type: "thread.session.stop",
+              origin: "ui-derived",
               commandId: newCommandId(),
               threadId: activeThreadId,
               createdAt: new Date().toISOString(),
@@ -391,6 +392,7 @@ export default function BranchToolbar({
         void api.orchestration
           .dispatchCommand({
             type: "thread.session.stop",
+            origin: "ui-derived",
             commandId: newCommandId(),
             threadId: activeThreadId,
             createdAt: new Date().toISOString(),
