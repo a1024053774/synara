@@ -543,29 +543,26 @@ export class A2AGates {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
     const current = this.load(args.task).current_attempt;
-    if (!current || current.attempt_id !== issue.attempt_id || current.reclaimed) {
-      this.appendIssue({
-        ...record,
-        id: randomUUID(),
-        kind: "disposition",
-        from: "system",
-        to: "executor",
-        reply_to: record.id,
-        body: "session-ended",
-        action: "forward",
-        created_at: new Date().toISOString(),
-      });
-      return { ok: true, ...this.readIssues(args.task) };
+    let action: "delivered" | "forward" = "forward";
+    if (current && current.attempt_id === issue.attempt_id && !current.reclaimed) {
+      try {
+        await this.runtime.sendUserAnswer(issue.thread_id, messageId, message);
+        action = "delivered";
+      } catch (error) {
+        // A native archive can precede gate reclaim. Only its explicit terminal
+        // receipt permits forwarding; unknown delivery failures stay errors.
+        if (!(error instanceof Refusal) || error.code !== "session_ended") throw error;
+      }
     }
-    await this.runtime.sendUserAnswer(issue.thread_id, messageId, message);
     this.appendIssue({
       ...record,
       id: randomUUID(),
       kind: "disposition",
       from: "system",
+      to: action === "forward" ? "executor" : record.to,
       reply_to: record.id,
-      body: "",
-      action: "delivered",
+      body: action === "forward" ? "session-ended" : "",
+      action,
       created_at: new Date().toISOString(),
     });
     return { ok: true, ...this.readIssues(args.task) };
