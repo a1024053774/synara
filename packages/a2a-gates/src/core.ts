@@ -341,13 +341,14 @@ export class A2AGates {
       this.db
         .prepare("INSERT INTO issue_records(id,task,thread,data) VALUES (?,?,?,?)")
         .run(record.id, record.task_id, record.thread_id, JSON.stringify(record));
-      this.event(
+      const sequence = this.event(
         record.task_id,
         `issue_${record.kind === "disposition" ? record.action : record.kind}`,
         record,
         record.attempt_id,
       );
       if (ownsTransaction) this.db.exec("COMMIT");
+      return sequence;
     } finally {
       if (ownsTransaction && this.db.isTransaction) this.db.exec("ROLLBACK");
     }
@@ -517,8 +518,11 @@ export class A2AGates {
     // Input, answer, message registration and derived intervention are atomic.
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const sequence = this.appendIssue(record);
+      // The panel RPC's authoritative domain record precedes dispatch. Its
+      // stable UUID and gate sequence identify the observed answer source.
+      input.source_ref = { message_id: messageId, event_id: record.id, source_sequence: sequence };
       this.saveUserInput(input);
-      this.appendIssue(record);
       this.event(
         issue.task_id,
         "human_intervention",
@@ -570,7 +574,7 @@ export class A2AGates {
     this.checkHumanInputObserver();
     const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(task);
     const current = row ? (JSON.parse(String(row.data)) as A2ATask).current_attempt : null;
-    this.db
+    const inserted = this.db
       .prepare("INSERT INTO events(time,task,attempt,type,details) VALUES (?,?,?,?,?)")
       .run(
         new Date().toISOString(),
@@ -579,6 +583,7 @@ export class A2AGates {
         type,
         JSON.stringify(details),
       );
+    return Number(inserted.lastInsertRowid);
   }
   private load(task: string): A2ATask {
     const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(task);

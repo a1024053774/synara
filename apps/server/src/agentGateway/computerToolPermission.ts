@@ -245,6 +245,7 @@ const SYNARA_GATEWAY_OWNED_TOOL_NAMES = [
 /** Every tool name the agent gateway serves, from the shared catalogs. */
 const SYNARA_GATEWAY_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>([
   "a2a_submit",
+  "a2a_raise",
   ...SYNARA_GATEWAY_OWNED_TOOL_NAMES,
   ...SYNARA_COMPUTER_TOOL_NAMES,
   ...BROWSER_TOOL_NAMES,
