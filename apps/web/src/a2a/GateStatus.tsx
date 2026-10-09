@@ -6,8 +6,8 @@ import { DisclosureChevron } from "../components/ui/DisclosureChevron";
 import { StatusChip } from "../components/ui/status-chip";
 import { resolveWsHttpUrl } from "../lib/wsHttpUrl";
 import { cn } from "../lib/utils";
-import { humanObserverView, type HumanObserverView } from "./humanObserver";
-import { ObserverFailureNote, ObserverIndicator } from "./HumanObserverStatus";
+import { userInputObserverView, type UserInputObserverView } from "./userInputObserver";
+import { ObserverFailureNote, ObserverIndicator } from "./UserInputObserverStatus";
 
 /**
  * The task window shows the gate once, in its own header. ChatView renders a
@@ -39,7 +39,7 @@ function ThreadGateStatus({ threadId }: { threadId: string }) {
       if (!response.ok) throw new Error(`门禁状态读取失败 (${response.status})`);
       const result = (await response.json()) as A2AGateResult;
       if (!result.ok) throw new Error(result.error ?? "门禁状态未知");
-      return { task: result.task ?? null, observer: humanObserverView(result) };
+      return { task: result.task ?? null, observer: userInputObserverView(result) };
     },
     refetchInterval: 1000,
   });
@@ -72,7 +72,7 @@ export function GateBar({
   actions,
 }: {
   task: A2ATask;
-  observer: HumanObserverView;
+  observer: UserInputObserverView;
   actions?: ReactNode;
 }) {
   const known = (STEPS as readonly string[]).includes(task.state);

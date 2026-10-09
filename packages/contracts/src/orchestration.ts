@@ -1528,12 +1528,14 @@ const ThreadDeleteCommand = Schema.Struct({
 });
 
 const ThreadArchiveCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.archive"),
   commandId: CommandId,
   threadId: ThreadId,
 });
 
 const ThreadUnarchiveCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.unarchive"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1736,6 +1738,7 @@ const ThreadClaudeCacheCompactedCommand = Schema.Struct({
 });
 
 const ThreadTurnInterruptCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.turn.interrupt"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1744,6 +1747,7 @@ const ThreadTurnInterruptCommand = Schema.Struct({
 });
 
 const ThreadTaskStopCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.task.stop"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1784,6 +1788,7 @@ const ThreadDispatchQueuedTurnCommand = Schema.Struct({
 });
 
 const ThreadApprovalRespondCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.approval.respond"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1794,6 +1799,7 @@ const ThreadApprovalRespondCommand = Schema.Struct({
 });
 
 const ThreadUserInputRespondCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.user-input.respond"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1839,6 +1845,7 @@ const ThreadMessageEditAndResendCommand = Schema.Struct({
 });
 
 const ThreadSessionStopCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
   threadId: ThreadId,

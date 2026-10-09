@@ -6,7 +6,7 @@ import {
   A2AGateRequest,
   type A2AAttempt,
   type A2ARun,
-  type A2AHumanInputObserver,
+  type A2AUserInputObserver,
   type A2AGateResult,
   type A2AVerification,
   type A2ACommandResult,
@@ -83,7 +83,8 @@ export interface SubmitCaller {
 export class A2AGates {
   private readonly db: DatabaseSync;
   private readonly membership: A2AMembership;
-  private humanInputObserver?: A2AHumanInputObserver;
+  private userInputObserver?: A2AUserInputObserver;
+  private readonly deferredUserInputs = new Map<string, A2AUserInput>();
   constructor(
     readonly root: string,
     private readonly runtime?: GateRuntime,
@@ -99,9 +100,13 @@ export class A2AGates {
       CREATE TABLE IF NOT EXISTS verifications (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, task TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS human_inputs (event_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS user_input_events (event_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS user_input_checkpoint (id INTEGER PRIMARY KEY CHECK(id=1), sequence INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_input_ingress (command_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS user_input_ingress_no_update BEFORE UPDATE ON user_input_ingress BEGIN SELECT RAISE(ABORT,'append only'); END;
+      CREATE TRIGGER IF NOT EXISTS user_input_ingress_no_delete BEFORE DELETE ON user_input_ingress BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TABLE IF NOT EXISTS issue_records (id TEXT PRIMARY KEY, task TEXT NOT NULL, thread TEXT NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS user_inputs (id TEXT PRIMARY KEY, task TEXT NOT NULL, message TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_inputs (id TEXT PRIMARY KEY, task TEXT, message TEXT, data TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS issue_records_no_update BEFORE UPDATE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS issue_records_no_delete BEFORE DELETE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS user_inputs_no_update BEFORE UPDATE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;
@@ -123,17 +128,32 @@ export class A2AGates {
             .all();
           return index.unique === 1 && columns.length === 1 && columns[0]!.name === "message";
         });
-      if (messageUnique)
+      const legacyColumns = this.db.prepare("PRAGMA table_info(user_inputs)").all();
+      if (
+        messageUnique ||
+        legacyColumns.some(
+          (column) => (column.name === "task" || column.name === "message") && column.notnull === 1,
+        )
+      )
         this.db.exec(`
-        CREATE TABLE user_inputs_bundle (id TEXT PRIMARY KEY, task TEXT NOT NULL, message TEXT NOT NULL, data TEXT NOT NULL);
+        CREATE TABLE user_inputs_bundle (id TEXT PRIMARY KEY, task TEXT, message TEXT, data TEXT NOT NULL);
         INSERT INTO user_inputs_bundle SELECT id,task,message,data FROM user_inputs ORDER BY rowid;
         DROP TABLE user_inputs;
         ALTER TABLE user_inputs_bundle RENAME TO user_inputs;
         CREATE TRIGGER user_inputs_no_update BEFORE UPDATE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;
         CREATE TRIGGER user_inputs_no_delete BEFORE DELETE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;`);
-      this.db.exec(
-        "CREATE INDEX IF NOT EXISTS user_inputs_message ON user_inputs(message); COMMIT",
-      );
+      this.db.exec("CREATE INDEX IF NOT EXISTS user_inputs_message ON user_inputs(message)");
+      // Copy the old dedup ledger atomically. Historical immutable events remain unchanged.
+      if (
+        this.db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='human_inputs'")
+          .get()
+      ) {
+        this.db.exec(
+          "INSERT OR IGNORE INTO user_input_events SELECT event_id FROM human_inputs; DROP TABLE human_inputs",
+        );
+      }
+      this.db.exec("COMMIT");
     } finally {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
@@ -170,7 +190,7 @@ export class A2AGates {
   saveMembership(input: A2ATaskMembership): A2ATaskMembership {
     const lock = this.operationLock(id(input.taskId));
     try {
-      this.checkHumanInputObserver();
+      this.checkUserInputObserver();
       const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(input.taskId);
       if (row)
         requireGate(
@@ -251,30 +271,30 @@ export class A2AGates {
       )
       .run(attachment.thread_id, JSON.stringify(attachment));
   }
-  humanInputObserverStatus(): A2AHumanInputObserver | undefined {
-    const status = this.humanInputObserver;
+  userInputObserverStatus(): A2AUserInputObserver | undefined {
+    const status = this.userInputObserver;
     return status
       ? { ...status, ...(status.failure ? { failure: { ...status.failure } } : {}) }
       : undefined;
   }
-  setHumanInputObserverStatus(
-    state: A2AHumanInputObserver["state"],
-    failure?: A2AHumanInputObserver["failure"],
+  setUserInputObserverStatus(
+    state: A2AUserInputObserver["state"],
+    failure?: A2AUserInputObserver["failure"],
   ) {
     // A failed recorder cannot reset itself. A new service instance must replay
     // the durable Synara journal before reporting healthy again.
-    if (this.humanInputObserver?.state === "failed") return;
-    this.humanInputObserver = {
+    if (this.userInputObserver?.state === "failed") return;
+    this.userInputObserver = {
       state,
       updated_at: new Date().toISOString(),
       ...(failure ? { failure } : {}),
     };
   }
-  private checkHumanInputObserver() {
+  private checkUserInputObserver() {
     requireGate(
-      this.humanInputObserver?.state !== "failed",
-      "human_input_observer_failed",
-      this.humanInputObserverStatus(),
+      this.userInputObserver?.state !== "failed",
+      "user_input_observer_failed",
+      this.userInputObserverStatus(),
     );
   }
   taskForThread(thread: string): A2ATask | null {
@@ -286,7 +306,73 @@ export class A2AGates {
     }
     return null;
   }
-  recordHumanInput(input: {
+  userInputTarget(thread: string, project?: string | null): A2AUserInput["target"] {
+    const row = this.db
+      .prepare("SELECT data FROM attempts WHERE json_extract(data,'$.thread_id')=?")
+      .get(thread);
+    const attempt = row ? (JSON.parse(String(row.data)) as A2AAttempt) : undefined;
+    const member = this.membership
+      .list()
+      .find((task) => task.members.some((m) => m.threadId === thread));
+    const taskId = attempt?.task_id ?? member?.taskId ?? null;
+    const taskRow = taskId
+      ? this.db.prepare("SELECT data FROM tasks WHERE id=?").get(taskId)
+      : undefined;
+    const task = taskRow ? (JSON.parse(String(taskRow.data)) as A2ATask) : undefined;
+    return {
+      project: task?.project_id ?? member?.projectId ?? project ?? null,
+      task: taskId,
+      attempt: attempt?.attempt_id ?? null,
+      thread,
+      turn: null,
+      message: null,
+      request: null,
+    };
+  }
+  /** Only the WS entry registers these receipts; domain replay never guesses command provenance. */
+  registerUserInputCommand(commandId: string, input: A2AUserInput): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO user_input_ingress(command_id,data) VALUES (?,?)")
+      .run(commandId, JSON.stringify(input));
+  }
+  userInputCommand(commandId: string): A2AUserInput | undefined {
+    const row = this.db
+      .prepare("SELECT data FROM user_input_ingress WHERE command_id=?")
+      .get(commandId);
+    return row ? (JSON.parse(String(row.data)) as A2AUserInput) : undefined;
+  }
+  userInputCheckpoint(): number | undefined {
+    const row = this.db.prepare("SELECT sequence FROM user_input_checkpoint WHERE id=1").get();
+    return row ? Number(row.sequence) : undefined;
+  }
+  advanceUserInputCheckpoint(sequence: number): void {
+    this.db
+      .prepare(
+        "INSERT INTO user_input_checkpoint(id,sequence) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET sequence=max(sequence,excluded.sequence)",
+      )
+      .run(sequence);
+  }
+  userInputCommands(): ReadonlyArray<{ commandId: string; input: A2AUserInput }> {
+    return this.db
+      .prepare("SELECT command_id,data FROM user_input_ingress ORDER BY rowid")
+      .all()
+      .map((row) => ({
+        commandId: String(row.command_id),
+        input: JSON.parse(String(row.data)) as A2AUserInput,
+      }));
+  }
+  deferUserInput(commandId: string, input: A2AUserInput): void {
+    // The RPC observation is still authoritative while this process retains it.
+    this.deferredUserInputs.set(commandId, input);
+  }
+  flushDeferredUserInputs(): void {
+    for (const [commandId, input] of this.deferredUserInputs) {
+      this.registerUserInputCommand(commandId, input);
+      this.appendUserInput(input, `rpc:${commandId}`);
+      this.deferredUserInputs.delete(commandId);
+    }
+  }
+  recordUserInput(input: {
     thread_id: string;
     message_id: string;
     event_id: string;
@@ -295,41 +381,32 @@ export class A2AGates {
     created_at: string;
     text: string;
     dispatch_origin: "user";
+    project_id?: string | null;
+    answer?: { request: string; content: unknown };
+    attachments?: unknown;
   }): boolean {
-    const row = this.db
-      .prepare("SELECT data FROM attempts WHERE json_extract(data,'$.thread_id')=?")
-      .get(input.thread_id);
-    if (!input.thread_id || !row) return false;
-    const attempt = JSON.parse(String(row.data)) as A2AAttempt;
-    // The issue-panel RPC registers its message before dispatch. Replay must
-    // not turn that answer into another input or intervention.
-    if (this.db.prepare("SELECT 1 FROM user_inputs WHERE message=?").get(input.message_id))
-      return false;
     requireGate(
       input.event_id && input.message_id && input.dispatch_origin === "user",
-      "invalid_human_input",
+      "invalid_user_input",
     );
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const inserted = this.db
-        .prepare("INSERT OR IGNORE INTO human_inputs(event_id) VALUES (?)")
-        .run(input.event_id);
-      if (!inserted.changes) return false;
-      const inputId = randomUUID();
-      this.saveUserInput({
-        id: inputId,
+    // Answer registration suppresses its dispatched message, including replay overlap.
+    if (this.db.prepare("SELECT 1 FROM user_inputs WHERE message=?").get(input.message_id))
+      return false;
+    const target = this.userInputTarget(input.thread_id, input.project_id);
+    return this.appendUserInput(
+      {
+        id: randomUUID(),
         schema: 1,
-        form: "message",
+        form: input.answer ? "answer" : "message",
         text: input.text,
         target: {
-          task: attempt.task_id,
-          attempt: attempt.attempt_id,
-          thread: input.thread_id,
+          ...target,
           turn: input.turn_id,
           message: input.message_id,
+          request: input.answer?.request ?? null,
         },
         channel: "thread-message",
-        reply_to: null,
+        reply_to: input.answer?.request ?? null,
         source_ref: {
           message_id: input.message_id,
           event_id: input.event_id,
@@ -337,21 +414,55 @@ export class A2AGates {
         },
         certainty: "observed",
         created_at: input.created_at,
-      });
-      this.event(
-        attempt.task_id,
-        "human_intervention",
-        {
-          ...input,
-          input_id: inputId,
-          task_id: attempt.task_id,
-          attempt_id: attempt.attempt_id,
-          session_id: attempt.session_id,
-          fence: attempt.fence,
-          spec_rev: attempt.spec_rev,
-        },
-        attempt.attempt_id,
-      );
+        ...(input.answer
+          ? { content: input.answer.content }
+          : input.attachments
+            ? { content: { attachments: input.attachments } }
+            : {}),
+      },
+      input.event_id,
+    );
+  }
+  appendUserInput(input: A2AUserInput, source: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const inserted = this.db
+        .prepare("INSERT OR IGNORE INTO user_input_events(event_id) VALUES (?)")
+        .run(source);
+      if (!inserted.changes) return false;
+      this.saveUserInput(input);
+      if (
+        input.target.attempt &&
+        input.target.task &&
+        input.channel !== "ui-derived" &&
+        input.form !== "gap"
+      ) {
+        const row = this.db
+          .prepare("SELECT data FROM attempts WHERE id=?")
+          .get(input.target.attempt)!;
+        const attempt = JSON.parse(String(row.data)) as A2AAttempt;
+        this.event(
+          input.target.task,
+          "human_intervention",
+          {
+            input_id: input.id,
+            task_id: input.target.task,
+            attempt_id: input.target.attempt,
+            thread_id: input.target.thread,
+            turn_id: input.target.turn,
+            message_id: input.target.message,
+            form: input.form,
+            event_id: input.source_ref.event_id ?? input.source_ref.command_id,
+            source_sequence: input.source_ref.source_sequence,
+            session_id: attempt.session_id,
+            fence: attempt.fence,
+            spec_rev: attempt.spec_rev,
+            dispatch_origin: "user",
+            text: input.text,
+          },
+          input.target.attempt,
+        );
+      }
       this.db.exec("COMMIT");
       return true;
     } finally {
@@ -359,9 +470,15 @@ export class A2AGates {
     }
   }
   private saveUserInput(input: A2AUserInput) {
-    this.db
-      .prepare("INSERT INTO user_inputs(id,task,message,data) VALUES (?,?,?,?)")
-      .run(input.id, input.target.task, input.target.message, JSON.stringify(input));
+    this.db.prepare("INSERT INTO user_inputs(id,task,message,data) VALUES (?,?,?,?)").run(
+      input.id,
+      input.target.task,
+      input.target.message,
+      JSON.stringify({
+        ...input,
+        target: { ...this.userInputTarget(input.target.thread), ...input.target },
+      }),
+    );
   }
   private appendIssue(record: A2AIssueRecord) {
     const ownsTransaction = !this.db.isTransaction;
@@ -440,7 +557,7 @@ export class A2AGates {
     requireGate(task, "stale_thread");
     const lock = this.operationLock(task.task_id);
     try {
-      this.checkHumanInputObserver();
+      this.checkUserInputObserver();
       const current = this.load(task.task_id);
       const attempt = current.current_attempt;
       requireGate(
@@ -748,7 +865,7 @@ export class A2AGates {
     return { ok: true, ...this.readIssues(args.task) };
   }
   private event(task: string, type: string, details: unknown, expectedAttempt?: string | null) {
-    this.checkHumanInputObserver();
+    this.checkUserInputObserver();
     const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(task);
     const current = row ? (JSON.parse(String(row.data)) as A2ATask).current_attempt : null;
     const inserted = this.db
@@ -773,7 +890,7 @@ export class A2AGates {
     details: unknown = task,
     historicalAttempt?: A2AAttempt,
   ) {
-    this.checkHumanInputObserver();
+    this.checkUserInputObserver();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
@@ -811,7 +928,7 @@ export class A2AGates {
     cwd: string,
     env?: NodeJS.ProcessEnv,
   ): Promise<A2ACommandResult> {
-    this.checkHumanInputObserver();
+    this.checkUserInputObserver();
     const command = argv[0];
     requireGate(command, "invalid_command");
     this.event(task, "command_intent", { argv, cwd });
@@ -952,7 +1069,7 @@ export class A2AGates {
   }
 
   private saveRun(run: A2ARun, type: string) {
-    this.checkHumanInputObserver();
+    this.checkUserInputObserver();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
@@ -987,7 +1104,7 @@ export class A2AGates {
     );
   }
   private async observeRun(run: A2ARun) {
-    this.checkHumanInputObserver();
+    this.checkUserInputObserver();
     const attempt = this.current(this.load(run.task_id), run.attempt_id!);
     let live: Awaited<ReturnType<GateRuntime["readThread"]>>;
     try {
@@ -1167,7 +1284,7 @@ export class A2AGates {
                 ? "integrated_reclaim_failed"
                 : "paused";
       run.ended = new Date().toISOString();
-      if (this.humanInputObserver?.state === "failed") {
+      if (this.userInputObserver?.state === "failed") {
         // The write that failed may also prevent a final receipt. Keep the last
         // durable phase and expose the pause; never invent persisted evidence.
         return { ok: false, error: code, details, run };
@@ -1181,8 +1298,8 @@ export class A2AGates {
 
   async call(raw: unknown, caller?: SubmitCaller): Promise<A2AGateResult> {
     const result = await this.request(raw, caller);
-    const observer = this.humanInputObserverStatus();
-    return { ...result, ...(observer ? { human_input_observer: observer } : {}) };
+    const observer = this.userInputObserverStatus();
+    return { ...result, ...(observer ? { user_input_observer: observer } : {}) };
   }
 
   private async request(raw: unknown, caller?: SubmitCaller, run?: A2ARun): Promise<A2AGateResult> {
@@ -1224,7 +1341,7 @@ export class A2AGates {
             "stale_thread",
           );
       }
-      this.checkHumanInputObserver();
+      this.checkUserInputObserver();
       if (args.command === "run") return await this.run(args);
       // A separate SQLite write transaction is the OS-released task operation lock.
       // Keep the inode, never unlink it. Main-state reads remain available during an oracle.
@@ -1303,7 +1420,7 @@ export class A2AGates {
         if (!actual)
           await this.git(taskId, repo, ["update-ref", REF, base, "0".repeat(base.length)]);
         requireGate((await this.integration(task)) === base, "integration_conflict");
-        this.checkHumanInputObserver();
+        this.checkUserInputObserver();
         await this.runtime?.ensureProject(task.project_id, repo);
         this.taskMembership(task);
         task.state = "ready";
@@ -1462,7 +1579,7 @@ export class A2AGates {
           throw new Refusal("worktree_failed");
         }
         if (args.command === "dispatch") {
-          this.checkHumanInputObserver();
+          this.checkUserInputObserver();
           await this.runtime!.createThread(task, attempt);
           this.member(task, attempt.thread_id, "worker");
           const live = await this.runtime!.readThread(attempt.thread_id);
@@ -1484,7 +1601,7 @@ export class A2AGates {
         };
         const prompt = `${readFileSync(task.instructions, "utf8")}\n\nManaged attempt identity: ${JSON.stringify(submit)}\nAfter implementing and committing, explicitly call the a2a_submit MCP tool with this identity and your full commit SHA. Never submit passed=true. Only this tool delivers your work; turn completion does not. Do not modify the contract or any acceptance tool. If any unexpected approval is requested, stop and report it.`;
         this.event(taskId, "prompt_intent", { thread: attempt.thread_id, prompt });
-        this.checkHumanInputObserver();
+        this.checkUserInputObserver();
         await this.runtime!.startThread(task, attempt, prompt);
         const live = await this.runtime!.readThread(attempt.thread_id);
         this.checkThread(attempt, live);
@@ -1765,12 +1882,12 @@ export class A2AGates {
       requireGate(!live.running, "worker_working");
       this.event(taskId, "reclaim_intent", { attempt, live }, attempt.attempt_id);
       if (ownsTask && task.state !== "accepted") this.invalidate(task, "controller reclaim");
-      this.checkHumanInputObserver();
+      this.checkUserInputObserver();
       await this.runtime.stopThread(attempt.thread_id);
       const stopped = await this.runtime.readThread(attempt.thread_id);
       this.checkThread(attempt, stopped);
       requireGate(stopped.stopped, "stop_unconfirmed");
-      this.checkHumanInputObserver();
+      this.checkUserInputObserver();
       await this.runtime.archiveThread(attempt.thread_id);
       const archived = await this.runtime.readThread(attempt.thread_id);
       this.checkThread(attempt, archived);
@@ -1797,7 +1914,7 @@ export class A2AGates {
             : "gate_failure";
       const details = error instanceof Refusal ? error.details : String(error);
       // A failed observer must remain queryable even when SQLite cannot append.
-      if (taskId && this.humanInputObserver?.state !== "failed")
+      if (taskId && this.userInputObserver?.state !== "failed")
         this.event(taskId, "rejected", { error: code, details, input: raw });
       return { ok: false, error: code, details };
     } finally {

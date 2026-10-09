@@ -2,7 +2,7 @@ import type { A2AGateResult } from "@synara/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { requestA2A } from "./api";
 import { humanInterventions } from "./humanIntervention";
-import { humanObserverView } from "./humanObserver";
+import { userInputObserverView } from "./userInputObserver";
 
 export function useGateTask(taskId: string | null, projectId: string | null) {
   return useQuery({
@@ -17,7 +17,7 @@ export function useGateTask(taskId: string | null, projectId: string | null) {
       );
       if (!status.ok) {
         if (status.error === "unknown_task")
-          return { task: null, interventions: [], observer: humanObserverView(status) };
+          return { task: null, interventions: [], observer: userInputObserverView(status) };
         throw new Error(status.error ?? "门禁状态读取失败");
       }
       if (!status.task || status.task.project_id !== projectId)
@@ -31,7 +31,7 @@ export function useGateTask(taskId: string | null, projectId: string | null) {
       return {
         task: status.task,
         interventions: humanInterventions(events.events, status.task.task_id),
-        observer: humanObserverView(events),
+        observer: userInputObserverView(events),
       };
     },
     refetchInterval: 1000,

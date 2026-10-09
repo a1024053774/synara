@@ -69,7 +69,7 @@ const route = Effect.gen(function* () {
   if (request.method === "GET") {
     const task = gates.taskForThread(url.searchParams.get("thread") ?? "");
     return HttpServerResponse.jsonUnsafe(
-      { ok: true, task, human_input_observer: gates.humanInputObserverStatus() },
+      { ok: true, task, user_input_observer: gates.userInputObserverStatus() },
       { headers },
     );
   }

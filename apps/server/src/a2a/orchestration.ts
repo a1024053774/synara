@@ -61,11 +61,21 @@ export function readManagedThread(
 }
 
 /** Observe authoritative server provenance. Input never delivers a candidate. */
-export function recordHumanMessage(gates: A2AGates, event: OrchestrationEvent): void {
+export function recordUserMessage(
+  gates: A2AGates,
+  event: OrchestrationEvent,
+  project?: string | null,
+  answer?: { request: string; content: unknown },
+): void {
   if (event.type !== "thread.message-sent") return;
   const message = event.payload;
-  if (message.role !== "user" || message.dispatchOrigin !== "user") return;
-  gates.recordHumanInput({
+  if (
+    message.role !== "user" ||
+    message.dispatchOrigin !== "user" ||
+    event.commandId?.startsWith("a2a:")
+  )
+    return;
+  gates.recordUserInput({
     thread_id: message.threadId,
     turn_id: message.turnId ?? null,
     message_id: message.messageId,
@@ -74,51 +84,180 @@ export function recordHumanMessage(gates: A2AGates, event: OrchestrationEvent): 
     created_at: message.createdAt,
     text: message.text,
     dispatch_origin: "user",
+    project_id: project ?? null,
+    ...(answer ? { answer } : {}),
+    ...(message.attachments
+      ? {
+          attachments: message.attachments.map((attachment) => ({
+            id: attachment.id,
+            type: attachment.type,
+            ...(attachment.type === "assistant-selection"
+              ? { message_id: attachment.assistantMessageId }
+              : {}),
+          })),
+        }
+      : {}),
   });
 }
 
-export const installHumanInputRecording = Effect.fn("a2a.installHumanInputRecording")(function* (
+export const installUserInputRecording = Effect.fn("a2a.installUserInputRecording")(function* (
   gates: A2AGates,
   engine: OrchestrationEngineShape,
 ) {
-  // Attach before replay; the core deduplicates overlapping event IDs. Replay
-  // also records messages committed while this service was not running.
-  gates.setHumanInputObserverStatus("starting");
+  gates.setUserInputObserverStatus("starting");
   const events = yield* engine.subscribeDomainEvents;
   const highWater = yield* engine.getEventHighWaterSequence;
+  const checkpoint = gates.userInputCheckpoint();
+  const gaps = new Map<string, { first: OrchestrationEvent; last: number }>();
+  let replaying = true;
+  let replayFailed = false;
+  const replayCommandTypes = new Set([
+    "thread.approval-response-requested",
+    "thread.user-input-response-requested",
+    "thread.turn-interrupt-requested",
+    "thread.session-stop-requested",
+    "thread.task-stop-requested",
+    "thread.archived",
+    "thread.unarchived",
+  ]);
+  const projects = new Map<string, string>();
+  const answers = new Map<string, { request: string; content: unknown }>();
   const record = (event: OrchestrationEvent) =>
-    Effect.try({
-      try: () => recordHumanMessage(gates, event),
-      catch: (cause) => ({
-        event_id: event.eventId,
-        source_sequence: event.sequence,
-        ...(event.type === "thread.message-sent"
-          ? {
-              thread_id: event.payload.threadId,
-              message_id: event.payload.messageId,
-            }
-          : {}),
-        reason: String(cause),
-      }),
+    Effect.gen(function* () {
+      if (event.type === "thread.async-user-input-answered") {
+        answers.set(event.payload.response.messageId, {
+          request: event.payload.messageId,
+          content: event.payload.response.answers,
+        });
+      }
+      if (event.type === "thread.created")
+        projects.set(event.payload.threadId, event.payload.projectId);
+      const project = projects.get(event.aggregateId);
+      const failure = yield* Effect.try({
+        try: () => {
+          recordUserMessage(
+            gates,
+            event,
+            project,
+            event.type === "thread.message-sent" ? answers.get(event.payload.messageId) : undefined,
+          );
+          gates.flushDeferredUserInputs();
+          const registered = event.commandId ? gates.userInputCommand(event.commandId) : undefined;
+          if (
+            replaying &&
+            checkpoint !== undefined &&
+            event.sequence > checkpoint &&
+            replayCommandTypes.has(event.type) &&
+            !registered &&
+            !event.commandId?.startsWith("a2a:")
+          ) {
+            const previous = gaps.get(event.aggregateId);
+            gaps.set(event.aggregateId, { first: previous?.first ?? event, last: event.sequence });
+          }
+          if (registered && event.type !== "thread.message-sent") {
+            gates.appendUserInput(
+              {
+                ...registered,
+                source_ref: {
+                  ...registered.source_ref,
+                  event_id: event.eventId,
+                  source_sequence: event.sequence,
+                },
+              },
+              `rpc:${event.commandId}`,
+            );
+          }
+          if (!replaying) gates.advanceUserInputCheckpoint(event.sequence);
+        },
+        catch: (cause) => ({
+          event_id: event.eventId,
+          source_sequence: event.sequence,
+          thread_id: event.aggregateId,
+          reason: String(cause),
+        }),
+      }).pipe(Effect.result);
+      if (failure._tag === "Failure") {
+        if (replaying) replayFailed = true;
+        // Managed failures retain the existing global fail-closed latch. Other
+        // failures leave business commands available; startup replays the journal.
+        if (gates.userInputTarget(event.aggregateId).attempt) {
+          gates.setUserInputObserverStatus("failed", failure.failure);
+        }
+        yield* Effect.logError("a2a user input recording failed", failure.failure);
+      }
     });
   yield* Stream.runForEach(engine.readEventsThrough(0, highWater), record);
+  for (const [thread, { first, last }] of gaps) {
+    const recovered = yield* Effect.try({
+      try: () =>
+        gates.appendUserInput(
+          {
+            id: `gap:${first.eventId}:${last}`,
+            schema: 1,
+            form: "gap",
+            text: "",
+            target: gates.userInputTarget(thread, projects.get(thread)),
+            channel: "ws-rpc",
+            reply_to: null,
+            source_ref: { event_id: first.eventId, source_sequence: first.sequence },
+            certainty: "observed",
+            created_at: first.occurredAt,
+            content: {
+              from_sequence: first.sequence,
+              through_sequence: last,
+              reason:
+                "RPC origin unavailable after recorder outage; these events may be user, ui-derived or internal commands",
+            },
+          },
+          `gap:${first.eventId}:${last}`,
+        ),
+      catch: (error) => error,
+    }).pipe(Effect.result);
+    if (recovered._tag === "Failure") {
+      replayFailed = true;
+      yield* Effect.logError("a2a input gap recovery failed", {
+        reason: String(recovered.failure),
+      });
+    }
+  }
+  if (!replayFailed) gates.advanceUserInputCheckpoint(highWater);
+  replaying = false;
+  // prepareQuitResume has no command event of its own. Its authoritative entry
+  // receipts also recover any write interrupted after registration.
+  for (const { commandId, input } of gates.userInputCommands()) {
+    const recovered = yield* Effect.try({
+      try: () => gates.appendUserInput(input, `rpc:${commandId}`),
+      catch: (error) => error,
+    }).pipe(Effect.result);
+    if (recovered._tag === "Failure") {
+      if (input.target.attempt)
+        gates.setUserInputObserverStatus("failed", {
+          thread_id: input.target.thread,
+          reason: String(recovered.failure),
+        });
+      yield* Effect.logError("a2a input receipt recovery failed", {
+        reason: String(recovered.failure),
+      });
+    }
+  }
   yield* Effect.forkScoped(
     Stream.runForEach(events, record).pipe(
       Effect.onExit((exit) => {
-        if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
-          return Effect.sync(() => gates.setHumanInputObserverStatus("stopped"));
-        }
+        if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause))
+          return Effect.sync(() => gates.setUserInputObserverStatus("stopped"));
         const failure = Exit.isFailure(exit)
           ? Option.getOrUndefined(Cause.findErrorOption(exit.cause))
           : undefined;
-        const details = failure ?? {
-          reason: Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "Human input stream ended",
-        };
-        return Effect.sync(() => gates.setHumanInputObserverStatus("failed", details)).pipe(
-          Effect.andThen(Effect.logError("a2a human input observer failed", details)),
+        return Effect.sync(() =>
+          gates.setUserInputObserverStatus(
+            "failed",
+            failure ?? {
+              reason: Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "User input stream ended",
+            },
+          ),
         );
       }),
     ),
   );
-  gates.setHumanInputObserverStatus("healthy");
+  gates.setUserInputObserverStatus("healthy");
 });

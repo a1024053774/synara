@@ -297,7 +297,7 @@ test("bundle keeps independent question numbers, exact Unicode text and one nati
     expect(result.issues!.map((v) => v.state)).toEqual(["已送达", "待判断", "已送达"]);
     expect((await f.call("status")).task).toEqual(before);
     expect(
-      f.gates.recordHumanInput({
+      f.gates.recordUserInput({
         thread_id: f.worker.thread_id,
         message_id: f.messages[0]!.messageId,
         event_id: randomUUID(),

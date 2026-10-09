@@ -61,6 +61,7 @@ export function RunningChatsQuitCoordinator() {
           }
           return api.orchestration.dispatchCommand({
             type: "thread.turn.interrupt",
+            origin: "ui-derived",
             commandId: newCommandId(),
             threadId: ThreadId.makeUnsafe(threadId),
             createdAt: new Date().toISOString(),

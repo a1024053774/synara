@@ -162,7 +162,7 @@ export interface A2ARun {
   cleanup_failure?: unknown;
 }
 
-export interface A2AHumanInputObserver {
+export interface A2AUserInputObserver {
   state: "starting" | "healthy" | "failed" | "stopped";
   updated_at: string;
   failure?: {
@@ -178,7 +178,7 @@ export interface A2AGateResult {
   ok: boolean;
   task?: A2ATask;
   run?: A2ARun;
-  human_input_observer?: A2AHumanInputObserver;
+  user_input_observer?: A2AUserInputObserver;
   attempt?: A2AAttempt;
   attachment?: A2AAttachment;
   verification?: A2AVerification;
@@ -228,14 +228,29 @@ export interface A2AIssueView {
 export interface A2AUserInput {
   id: string;
   schema: 1;
-  form: "message" | "answer";
+  form: "message" | "answer" | "approval" | "denial" | "choice" | "action" | "gap";
   text: string;
-  target: { task: string; attempt: string; thread: string; turn: string | null; message: string };
-  channel: "thread-message" | "issue-panel";
+  target: {
+    project?: string | null;
+    task: string | null;
+    attempt: string | null;
+    thread: string;
+    turn: string | null;
+    message: string | null;
+    request?: string | null;
+  };
+  channel: "thread-message" | "issue-panel" | "ws-rpc" | "ui-derived";
   reply_to: string | null;
-  source_ref: { message_id: string; event_id?: string; source_sequence?: number };
+  source_ref: {
+    message_id?: string;
+    event_id?: string;
+    source_sequence?: number;
+    command_id?: string;
+    rpc?: string;
+  };
   certainty: "observed";
   created_at: string;
   bundle_id?: string;
   question?: { number: number; title: string; body: string };
+  content?: unknown;
 }

@@ -10,7 +10,7 @@ import {
   type A2ARun,
 } from "@synara/contracts";
 import { Effect, Layer, Option, ServiceMap } from "effect";
-import { installHumanInputRecording, readManagedThread } from "./orchestration";
+import { installUserInputRecording, readManagedThread } from "./orchestration";
 import { ServerConfig } from "../config";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery";
@@ -266,7 +266,7 @@ export const A2AGateServiceLive = Layer.effect(
       },
     });
     yield* Effect.addFinalizer(() => Effect.sync(() => core.close()));
-    yield* installHumanInputRecording(core, engine);
+    yield* installUserInputRecording(core, engine);
     return core;
   }),
 );

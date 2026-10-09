@@ -99,6 +99,7 @@ async function disposeTemporaryThread(input: {
         await api.orchestration
           .dispatchCommand({
             type: "thread.session.stop",
+            origin: "ui-derived",
             commandId: newCommandId(),
             threadId: temporaryThreadId,
             createdAt: new Date().toISOString(),

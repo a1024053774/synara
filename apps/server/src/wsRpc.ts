@@ -1,3 +1,5 @@
+import { A2AGateService } from "./a2a/service";
+import { recordUserCommand, recordQuitResumeInput } from "./a2a/userInput";
 import { readEventLoopStatus } from "./eventLoopMonitor";
 import { makeGitActionRunner } from "./git/gitActionRunner";
 import { AgentGatewaySessionRegistry } from "./agentGateway/Services/AgentGatewaySessionRegistry";
@@ -1335,6 +1337,11 @@ const makeWsRpcHandlersLayer = () =>
                   threadId: normalizedCommand.threadId,
                 });
               }
+              yield* recordUserCommand(
+                yield* A2AGateService,
+                orchestrationEngine,
+                normalizedCommand,
+              );
               const result = yield* dispatchOrchestrationCommand(normalizedCommand);
               // Only scaffold managed workspace-root subdirectories (Inbox/Outbox/work/outputs)
               // AFTER the decider has accepted the command. A rejected dispatch (e.g. a
@@ -1426,11 +1433,14 @@ const makeWsRpcHandlersLayer = () =>
             // Gated as a whole (not just its dispatches) so the record can never be
             // written while startup is still claiming the previous quit's record.
             runtimeStartup.enqueueCommand(
-              prepareQuitResume({
-                request: input,
-                recordPath: config.quitResumeStatePath,
-                getReadModel: orchestrationEngine.getReadModel,
-                dispatch: dispatchOrchestrationCommand,
+              Effect.gen(function* () {
+                yield* recordQuitResumeInput(yield* A2AGateService, input);
+                return yield* prepareQuitResume({
+                  request: input,
+                  recordPath: config.quitResumeStatePath,
+                  getReadModel: orchestrationEngine.getReadModel,
+                  dispatch: dispatchOrchestrationCommand,
+                });
               }),
             ),
             "Failed to prepare chats for resume after quit",
