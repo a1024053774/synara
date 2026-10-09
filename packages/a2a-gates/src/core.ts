@@ -150,12 +150,21 @@ export class A2AGates {
             .prepare("SELECT data FROM attempts WHERE json_extract(data,'$.thread_id')=?")
             .get(threadId);
           const attempt = worker ? (JSON.parse(String(worker.data)) as A2AAttempt) : undefined;
-          const endedAt =
+          let endedAt =
             attachment?.state === "ended"
               ? attachment.ended_at
               : attempt?.reclaimed
                 ? attempt.reclaimed_at
                 : current?.members.find((member) => member.threadId === threadId)?.endedAt;
+          if (attempt?.reclaimed && !endedAt) {
+            // Published attempt records before reclaimed_at retain their
+            // completion time in the append-only event journal.
+            const completed = this.db.prepare(
+              "SELECT time FROM events WHERE task=? AND attempt=? AND type='reclaimed' ORDER BY seq DESC LIMIT 1",
+            ).get(attempt.task_id, attempt.attempt_id);
+            requireGate(completed, "reclaim_unconfirmed");
+            endedAt = String(completed.time);
+          }
           return { threadId, role, ...(endedAt ? { endedAt } : {}) };
         }),
       });
