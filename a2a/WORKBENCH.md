@@ -36,6 +36,8 @@ Codex 沿用 Synara 的正常 CODEX_HOME overlay：启动器保留用户 HOME �
 
 其他操作传现有 `A2AGateRequest` JSON；该脚本读取 `a2a-gates/endpoint.json`，再经 HTTP 调用 `packages/a2a-gates/src/cli.ts`，不直接操作门禁数据库。请求与回执保持原门禁契约。未启动、endpoint 权限不为 0600 或进程身份不匹配时拒绝调用。
 
+`run` 同步等待最终回执，CLI 对此请求关闭 Bun 的 HTTP 空闲超时，由门禁控制提交等待与阶段期限。`wait_seconds` 只约束成功投递后等待 submit 的阶段，不是整个 run 的总时限。客户端断开不表示服务端 run 已取消；可经 `status` 和 `events` 核对原 attempt 的结果。
+
 `create` 接受可选 `title`（省略时用 task id），并建立任务窗口条目；自动新建项目时用请求中的 `project` id 作为项目名，已有项目保留原名；`dispatch` 自动归入 worker 会话。主控可用 `attach` 创建带角色的普通会话，例如：
 
 ```sh
