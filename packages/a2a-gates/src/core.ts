@@ -142,7 +142,20 @@ export class A2AGates {
       return this.membership.save({
         ...input,
         members: input.members.map(({ threadId, role }) => {
-          const endedAt = current?.members.find((member) => member.threadId === threadId)?.endedAt;
+          const attached = this.db.prepare("SELECT data FROM attachments WHERE id=?").get(threadId);
+          const attachment = attached
+            ? (JSON.parse(String(attached.data)) as A2AAttachment)
+            : undefined;
+          const worker = this.db
+            .prepare("SELECT data FROM attempts WHERE json_extract(data,'$.thread_id')=?")
+            .get(threadId);
+          const attempt = worker ? (JSON.parse(String(worker.data)) as A2AAttempt) : undefined;
+          const endedAt =
+            attachment?.state === "ended"
+              ? attachment.ended_at
+              : attempt?.reclaimed
+                ? attempt.reclaimed_at
+                : current?.members.find((member) => member.threadId === threadId)?.endedAt;
           return { threadId, role, ...(endedAt ? { endedAt } : {}) };
         }),
       });
@@ -172,6 +185,7 @@ export class A2AGates {
       role: previous?.role ?? role,
       ...(endedAt ? { endedAt } : previous?.endedAt ? { endedAt: previous.endedAt } : {}),
     };
+    if (previous && previous.endedAt === member.endedAt) return;
     this.membership.save({
       ...membership,
       members: previous
@@ -816,7 +830,11 @@ export class A2AGates {
         const attachment = JSON.parse(String(row.data)) as A2AAttachment;
         requireGate(attachment.task_id === taskId, "stale_thread");
         requireGate(this.runtime, "runtime_required");
-        if (attachment.state === "ended") return { ok: true, task, attachment };
+        if (attachment.state === "ended") {
+          requireGate(attachment.ended_at, "reclaim_unconfirmed");
+          this.member(task, thread, attachment.role, attachment.ended_at);
+          return { ok: true, task, attachment };
+        }
         const live = await this.runtime.readThread(thread);
         requireGate(
           live.workspace === task.repo && live.provider === attachment.modelSelection.provider,
@@ -825,16 +843,21 @@ export class A2AGates {
         requireGate(!live.blocked, "run_blocked", live);
         requireGate(!live.running, "worker_working");
         this.event(taskId, "attachment_reclaim_intent", { attachment, live }, null);
-        await this.runtime.stopThread(thread);
-        const stopped = await this.runtime.readThread(thread);
-        requireGate(
-          stopped.workspace === task.repo &&
-            stopped.provider === attachment.modelSelection.provider &&
-            stopped.stopped,
-          "stop_unconfirmed",
-        );
-        await this.runtime.archiveThread(thread);
-        const archived = await this.runtime.readThread(thread);
+        let archived = live;
+        // A failed bookkeeping write may follow confirmed native stop/archive.
+        // Reconcile those observed facts without repeating the external effects.
+        if (!(live.stopped && live.archived)) {
+          await this.runtime.stopThread(thread);
+          const stopped = await this.runtime.readThread(thread);
+          requireGate(
+            stopped.workspace === task.repo &&
+              stopped.provider === attachment.modelSelection.provider &&
+              stopped.stopped,
+            "stop_unconfirmed",
+          );
+          await this.runtime.archiveThread(thread);
+          archived = await this.runtime.readThread(thread);
+        }
         requireGate(
           archived.workspace === task.repo &&
             archived.provider === attachment.modelSelection.provider &&
@@ -844,9 +867,15 @@ export class A2AGates {
         );
         attachment.state = "ended";
         attachment.ended_at = new Date().toISOString();
+        this.db.exec("BEGIN IMMEDIATE");
+        try {
+          this.saveAttachment(attachment);
+          this.event(taskId, "attachment_reclaimed", { attachment, archived }, null);
+          this.db.exec("COMMIT");
+        } finally {
+          if (this.db.isTransaction) this.db.exec("ROLLBACK");
+        }
         this.member(task, thread, attachment.role, attachment.ended_at);
-        this.saveAttachment(attachment);
-        this.event(taskId, "attachment_reclaimed", { attachment, archived }, null);
         return { ok: true, task, attachment };
       }
       if (args.command === "revoke" || args.command === "revise") {
@@ -1231,7 +1260,8 @@ export class A2AGates {
       this.checkThread(attempt, archived);
       requireGate(archived.archived && archived.stopped, "reclaim_unconfirmed");
       attempt.reclaimed = true;
-      this.member(task, attempt.thread_id, "worker", new Date().toISOString());
+      attempt.reclaimed_at = new Date().toISOString();
+      this.member(task, attempt.thread_id, "worker", attempt.reclaimed_at);
       this.save(task, "reclaimed", { attempt, archived }, attempt);
       return { ok: true, task };
     } catch (error) {

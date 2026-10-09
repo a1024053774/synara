@@ -52,6 +52,7 @@ export interface A2AAttempt {
   workspace: string;
   base_commit: string;
   reclaimed: boolean;
+  reclaimed_at?: string;
   owner?: string;
   state?: string;
   revocation_reason?: string;
