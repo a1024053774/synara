@@ -9,7 +9,13 @@ export const A2ATaskMembership = Schema.Struct({
   projectId: ProjectId,
   title: TrimmedNonEmptyString.check(Schema.isMaxLength(240)),
   revision: NonNegativeInt,
-  members: Schema.Array(Schema.Struct({ threadId: ThreadId, role: A2AMemberRole })),
+  members: Schema.Array(
+    Schema.Struct({
+      threadId: ThreadId,
+      role: A2AMemberRole,
+      endedAt: Schema.optional(Schema.String),
+    }),
+  ),
 });
 export type A2ATaskMembership = typeof A2ATaskMembership.Type;
 

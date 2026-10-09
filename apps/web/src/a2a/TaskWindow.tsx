@@ -296,7 +296,11 @@ export function TaskWindow() {
                         key={member.threadId}
                         aria-label={`${member.role} agent 会话`}
                         data-a2a-pane={member.threadId}
-                        className="flex min-h-0 min-w-88 flex-1 basis-0 snap-start flex-col border-r border-border last:border-r-0"
+                        data-a2a-ended={member.endedAt ? "true" : undefined}
+                        className={cn(
+                          "flex min-h-0 min-w-88 flex-1 basis-0 snap-start flex-col border-r border-border last:border-r-0",
+                          member.endedAt && "opacity-55",
+                        )}
                         onFocusCapture={() => setFocused(member.threadId)}
                         onPointerDown={() => setFocused(member.threadId)}
                       >
@@ -308,6 +312,11 @@ export function TaskWindow() {
                           )}
                         >
                           <Badge variant="outline">{member.role}</Badge>
+                          {member.endedAt && (
+                            <Badge variant="outline" title={member.endedAt}>
+                              已结束
+                            </Badge>
+                          )}
                           <h3
                             className={cn(
                               "min-w-0 flex-1 truncate",

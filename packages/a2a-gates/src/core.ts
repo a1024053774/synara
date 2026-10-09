@@ -11,9 +11,14 @@ import {
   type A2AVerification,
   type A2ACommandResult,
   type A2ATask,
+  type A2AAttachment,
+  type A2ATaskMembership,
+  ProjectId,
+  ThreadId,
 } from "@synara/contracts";
 import { execProcessFile } from "@synara/shared/processRuntime";
 import { Schema } from "effect";
+import { A2AMembership } from "./membership";
 
 const REF = "refs/a2a/integration";
 export class Refusal extends Error {
@@ -61,6 +66,7 @@ export interface GateRuntime {
   }>;
   stopThread(thread: string): Promise<void>;
   archiveThread(thread: string): Promise<void>;
+  createAttachedThread?(task: A2ATask, attachment: A2AAttachment, prompt: string): Promise<void>;
 }
 export interface SubmitCaller {
   thread: string;
@@ -71,6 +77,7 @@ export interface SubmitCaller {
 /** The sole mutation owner. Thread lifecycle signals never invoke this core. */
 export class A2AGates {
   private readonly db: DatabaseSync;
+  private readonly membership: A2AMembership;
   private humanInputObserver?: A2AHumanInputObserver;
   constructor(
     readonly root: string,
@@ -79,11 +86,13 @@ export class A2AGates {
     requireGate(isAbsolute(root), "invalid_path");
     mkdirSync(root, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(join(root, "state.sqlite3"));
+    this.membership = new A2AMembership(root);
     this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS verifications (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, task TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS human_inputs (event_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, task TEXT NOT NULL, attempt TEXT, type TEXT NOT NULL, details TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;
@@ -98,7 +107,84 @@ export class A2AGates {
     mkdirSync(join(root, "locks"), { recursive: true });
   }
   close() {
+    this.membership.close();
     this.db.close();
+  }
+  private operationLock(task: string): DatabaseSync {
+    const lock = new DatabaseSync(join(this.root, "locks", `${task}.sqlite3`));
+    lock.exec("PRAGMA busy_timeout=0");
+    try {
+      lock.exec("BEGIN IMMEDIATE");
+      return lock;
+    } catch (error) {
+      lock.close();
+      if (
+        (error as { errcode?: number }).errcode === 5 ||
+        (error as Error).message.includes("database is locked")
+      )
+        throw new Refusal("operation_busy");
+      throw error;
+    }
+  }
+  /** The manual correction route shares the gate operation lock and revision CAS. */
+  saveMembership(input: A2ATaskMembership): A2ATaskMembership {
+    const lock = this.operationLock(id(input.taskId));
+    try {
+      this.checkHumanInputObserver();
+      const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(input.taskId);
+      if (row)
+        requireGate(
+          (JSON.parse(String(row.data)) as A2ATask).project_id === input.projectId,
+          "gate_project_mismatch",
+        );
+      // Lifecycle comes from durable gate bindings, never from a manual editor.
+      const current = this.membership.list().find((task) => task.taskId === input.taskId);
+      return this.membership.save({
+        ...input,
+        members: input.members.map(({ threadId, role }) => {
+          const endedAt = current?.members.find((member) => member.threadId === threadId)?.endedAt;
+          return { threadId, role, ...(endedAt ? { endedAt } : {}) };
+        }),
+      });
+    } finally {
+      lock.close();
+    }
+  }
+  private taskMembership(task: A2ATask): A2ATaskMembership {
+    const current = this.membership.list().find((item) => item.taskId === task.task_id);
+    if (current) {
+      requireGate(current.projectId === task.project_id, "gate_project_mismatch");
+      return current;
+    }
+    return this.membership.save({
+      taskId: task.task_id,
+      projectId: ProjectId.makeUnsafe(task.project_id),
+      title: task.title ?? task.task_id,
+      revision: 0,
+      members: [],
+    });
+  }
+  private member(task: A2ATask, thread: string, role: A2AAttachment["role"], endedAt?: string) {
+    const membership = this.taskMembership(task);
+    const previous = membership.members.find((member) => member.threadId === thread);
+    const member = {
+      threadId: ThreadId.makeUnsafe(thread),
+      role: previous?.role ?? role,
+      ...(endedAt ? { endedAt } : previous?.endedAt ? { endedAt: previous.endedAt } : {}),
+    };
+    this.membership.save({
+      ...membership,
+      members: previous
+        ? membership.members.map((value) => (value.threadId === thread ? member : value))
+        : [...membership.members, member],
+    });
+  }
+  private saveAttachment(attachment: A2AAttachment) {
+    this.db
+      .prepare(
+        "INSERT INTO attachments(id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+      )
+      .run(attachment.thread_id, JSON.stringify(attachment));
   }
   humanInputObserverStatus(): A2AHumanInputObserver | undefined {
     const status = this.humanInputObserver;
@@ -179,7 +265,7 @@ export class A2AGates {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
   }
-  private event(task: string, type: string, details: unknown, expectedAttempt?: string) {
+  private event(task: string, type: string, details: unknown, expectedAttempt?: string | null) {
     this.checkHumanInputObserver();
     const row = this.db.prepare("SELECT data FROM tasks WHERE id=?").get(task);
     const current = row ? (JSON.parse(String(row.data)) as A2ATask).current_attempt : null;
@@ -188,7 +274,7 @@ export class A2AGates {
       .run(
         new Date().toISOString(),
         task,
-        expectedAttempt ?? current?.attempt_id ?? null,
+        expectedAttempt === undefined ? (current?.attempt_id ?? null) : expectedAttempt,
         type,
         JSON.stringify(details),
       );
@@ -630,22 +716,16 @@ export class A2AGates {
           })),
         };
       }
+      if (caller)
+        requireGate(
+          args.command === "submit" && this.taskForThread(caller.thread)?.task_id === taskId,
+          "stale_thread",
+        );
       this.checkHumanInputObserver();
       if (args.command === "run") return await this.run(args);
       // A separate SQLite write transaction is the OS-released task operation lock.
       // Keep the inode, never unlink it. Main-state reads remain available during an oracle.
-      lock = new DatabaseSync(join(this.root, "locks", `${taskId}.sqlite3`));
-      lock.exec("PRAGMA busy_timeout=0");
-      try {
-        lock.exec("BEGIN IMMEDIATE");
-      } catch (error) {
-        if (
-          (error as { errcode?: number }).errcode === 5 ||
-          (error as Error).message.includes("database is locked")
-        )
-          throw new Refusal("operation_busy");
-        throw error;
-      }
+      lock = this.operationLock(taskId);
       if (args.command === "create") {
         requireGate(!this.db.prepare("SELECT 1 FROM tasks WHERE id=?").get(taskId), "task_exists");
         const repo = inputPath(args.repo, true),
@@ -660,6 +740,7 @@ export class A2AGates {
         const snapshot = join(this.root, "tasks", `${taskId}-${randomUUID()}`);
         const task: A2ATask = {
           task_id: taskId,
+          title: text(args.title ?? taskId),
           project_id: id(args.project ?? (this.runtime ? undefined : taskId)),
           repo,
           oracle: join(snapshot, "oracle.py"),
@@ -673,6 +754,12 @@ export class A2AGates {
           verification: null,
           integration_intent: null,
         };
+        requireGate(task.title!.length <= 240, "invalid_title");
+        const membership = this.membership.list().find((item) => item.taskId === taskId);
+        requireGate(
+          !membership || membership.projectId === task.project_id,
+          "gate_project_mismatch",
+        );
         const actual = await this.integration(task);
         requireGate(!actual || actual === base, "integration_conflict");
         const instructionBytes = readFileSync(instructions);
@@ -691,11 +778,77 @@ export class A2AGates {
         requireGate((await this.integration(task)) === base, "integration_conflict");
         this.checkHumanInputObserver();
         await this.runtime?.ensureProject(task.project_id, repo);
+        this.taskMembership(task);
         task.state = "ready";
         this.save(task, "created");
         return { ok: true, task };
       }
       const task = this.load(taskId);
+      if (args.command === "attach") {
+        requireGate(this.runtime?.createAttachedThread, "runtime_required");
+        requireGate(
+          args.role && args.modelSelection && args.runtimeMode,
+          "attachment_arguments_required",
+        );
+        const prompt = readFileSync(inputPath(args.instructions), "utf8");
+        requireGate(prompt.trim(), "invalid_text");
+        const attachment: A2AAttachment = {
+          task_id: taskId,
+          thread_id: randomUUID(),
+          role: args.role,
+          modelSelection: args.modelSelection,
+          runtime_mode: args.runtimeMode,
+          state: "creating",
+        };
+        this.saveAttachment(attachment);
+        await this.runtime.createAttachedThread(task, attachment, prompt);
+        this.member(task, attachment.thread_id, attachment.role);
+        attachment.state = "active";
+        this.saveAttachment(attachment);
+        this.event(taskId, "attached", { attachment, prompt }, null);
+        return { ok: true, task, attachment };
+      }
+      if (args.command === "reclaim" && args.thread !== undefined) {
+        requireGate(!args.attempt, "ambiguous_reclaim");
+        const thread = id(args.thread);
+        const row = this.db.prepare("SELECT data FROM attachments WHERE id=?").get(thread);
+        requireGate(row, "unknown_attachment");
+        const attachment = JSON.parse(String(row.data)) as A2AAttachment;
+        requireGate(attachment.task_id === taskId, "stale_thread");
+        requireGate(this.runtime, "runtime_required");
+        if (attachment.state === "ended") return { ok: true, task, attachment };
+        const live = await this.runtime.readThread(thread);
+        requireGate(
+          live.workspace === task.repo && live.provider === attachment.modelSelection.provider,
+          "identity_conflict",
+        );
+        requireGate(!live.blocked, "run_blocked", live);
+        requireGate(!live.running, "worker_working");
+        this.event(taskId, "attachment_reclaim_intent", { attachment, live }, null);
+        await this.runtime.stopThread(thread);
+        const stopped = await this.runtime.readThread(thread);
+        requireGate(
+          stopped.workspace === task.repo &&
+            stopped.provider === attachment.modelSelection.provider &&
+            stopped.stopped,
+          "stop_unconfirmed",
+        );
+        await this.runtime.archiveThread(thread);
+        const archived = await this.runtime.readThread(thread);
+        requireGate(
+          archived.workspace === task.repo &&
+            archived.provider === attachment.modelSelection.provider &&
+            archived.stopped &&
+            archived.archived,
+          "reclaim_unconfirmed",
+        );
+        attachment.state = "ended";
+        attachment.ended_at = new Date().toISOString();
+        this.member(task, thread, attachment.role, attachment.ended_at);
+        this.saveAttachment(attachment);
+        this.event(taskId, "attachment_reclaimed", { attachment, archived }, null);
+        return { ok: true, task, attachment };
+      }
       if (args.command === "revoke" || args.command === "revise") {
         requireGate(task.state !== "accepted", "already_accepted");
         requireGate(!task.integration_intent, "needs_reconciliation");
@@ -768,6 +921,7 @@ export class A2AGates {
         if (args.command === "dispatch") {
           this.checkHumanInputObserver();
           await this.runtime!.createThread(task, attempt);
+          this.member(task, attempt.thread_id, "worker");
           const live = await this.runtime!.readThread(attempt.thread_id);
           this.checkThread(attempt, live);
           requireGate(!live.blocked, "run_blocked", live);
@@ -1077,6 +1231,7 @@ export class A2AGates {
       this.checkThread(attempt, archived);
       requireGate(archived.archived && archived.stopped, "reclaim_unconfirmed");
       attempt.reclaimed = true;
+      this.member(task, attempt.thread_id, "worker", new Date().toISOString());
       this.save(task, "reclaimed", { attempt, archived }, attempt);
       return { ok: true, task };
     } catch (error) {

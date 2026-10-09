@@ -1,4 +1,6 @@
 import { Schema } from "effect";
+import { ModelSelection } from "./orchestration";
+import { A2AMemberRole } from "./a2aMembership";
 
 export const A2AGateRequest = Schema.Struct({
   command: Schema.Literals([
@@ -7,6 +9,7 @@ export const A2AGateRequest = Schema.Struct({
     "revoke",
     "revise",
     "dispatch",
+    "attach",
     "run",
     "submit",
     "verify",
@@ -18,6 +21,10 @@ export const A2AGateRequest = Schema.Struct({
   task: Schema.String,
   repo: Schema.optional(Schema.String),
   project: Schema.optional(Schema.String),
+  title: Schema.optional(Schema.String),
+  thread: Schema.optional(Schema.String),
+  role: Schema.optional(A2AMemberRole),
+  modelSelection: Schema.optional(ModelSelection),
   base: Schema.optional(Schema.String),
   oracle: Schema.optional(Schema.String),
   instructions: Schema.optional(Schema.String),
@@ -77,6 +84,7 @@ export interface A2AVerification {
 
 export interface A2ATask {
   task_id: string;
+  title?: string;
   project_id: string;
   repo: string;
   oracle: string;
@@ -101,6 +109,17 @@ export interface A2ATask {
     result?: A2ACommandResult;
     state: "pending" | "completed";
   } | null;
+}
+
+/** A normal native session with a display role, never a delivery attempt. */
+export interface A2AAttachment {
+  task_id: string;
+  thread_id: string;
+  role: typeof A2AMemberRole.Type;
+  modelSelection: typeof ModelSelection.Type;
+  runtime_mode: "approval-required" | "full-access";
+  state: "creating" | "active" | "ended";
+  ended_at?: string;
 }
 
 export interface A2ARun {
@@ -137,6 +156,7 @@ export interface A2AGateResult {
   run?: A2ARun;
   human_input_observer?: A2AHumanInputObserver;
   attempt?: A2AAttempt;
+  attachment?: A2AAttachment;
   verification?: A2AVerification;
   replayed?: boolean;
   reconciled?: boolean;

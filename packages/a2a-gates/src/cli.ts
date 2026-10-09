@@ -4,8 +4,9 @@ import { Schema } from "effect";
 import { A2AGates, Refusal, type GateRuntime } from "./core";
 
 const commands: Record<string, { required: string[]; optional?: string[] }> = {
-  create: { required: ["repo", "base", "oracle", "instructions"], optional: ["project"] },
+  create: { required: ["repo", "base", "oracle", "instructions"], optional: ["project", "title"] },
   dispatch: { required: ["runtime-mode"] },
+  attach: { required: ["role", "model-selection", "instructions", "runtime-mode"] },
   run: { required: ["runtime-mode", "wait-seconds"] },
   claim: { required: ["owner"] },
   revoke: { required: ["reason"] },
@@ -15,7 +16,7 @@ const commands: Record<string, { required: string[]; optional?: string[] }> = {
   integrate: { required: [], optional: ["attempt"] },
   status: { required: [] },
   events: { required: [] },
-  reclaim: { required: [], optional: ["attempt"] },
+  reclaim: { required: [], optional: ["attempt", "thread"] },
 };
 
 async function emit(result: unknown) {
@@ -59,6 +60,10 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
       "task",
       "repo",
       "project",
+      "title",
+      "thread",
+      "role",
+      "model-selection",
       "runtime-mode",
       "wait-seconds",
       "base",
@@ -99,7 +104,8 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
         )
           throw new Error("integer required: " + key);
         request[key.replaceAll("-", "_")] = Number(value);
-      } else request[key === "runtime-mode" ? "runtimeMode" : key] = value;
+      } else if (key === "model-selection") request.modelSelection = JSON.parse(value!);
+      else request[key === "runtime-mode" ? "runtimeMode" : key] = value;
     }
   } catch (error) {
     console.error("usage: --state ABS_DIR COMMAND --task ID ...\n" + String(error));

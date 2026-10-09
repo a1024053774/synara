@@ -7,6 +7,7 @@ import { ServerConfig } from "../config";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery";
 import { readMcpJsonBody } from "../agentGateway/httpRoute";
 import { A2AGateService } from "./service";
+import { Refusal } from "@synara/a2a-gates";
 
 /** Called only after the existing gate route's origin and owner checks. */
 export function membershipRoute(
@@ -65,9 +66,12 @@ export function membershipRoute(
           );
       }
       try {
-        return HttpServerResponse.jsonUnsafe({ ok: true, task: store.save(task) }, { headers });
+        return HttpServerResponse.jsonUnsafe(
+          { ok: true, task: gates.saveMembership(task) },
+          { headers },
+        );
       } catch (error) {
-        if (!(error instanceof MembershipRefusal)) throw error;
+        if (!(error instanceof MembershipRefusal) && !(error instanceof Refusal)) throw error;
         return HttpServerResponse.jsonUnsafe(
           { ok: false, error: error.code },
           {

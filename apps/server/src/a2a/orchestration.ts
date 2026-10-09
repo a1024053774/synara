@@ -10,14 +10,12 @@ import type { OrchestrationEngineShape } from "../orchestration/Services/Orchest
 export function readManagedThread(
   shell: OrchestrationThreadShell,
   sessions: ReadonlyArray<ProviderSession>,
+  workspace = shell.worktreePath ?? "",
 ): Awaited<ReturnType<GateRuntime["readThread"]>> {
   const matches = sessions.filter((session) => session.threadId === shell.id);
   if (matches.length > 1) throw new Refusal("identity_conflict", matches);
   const active = matches[0];
-  if (
-    active &&
-    (active.cwd !== shell.worktreePath || active.provider !== shell.modelSelection.provider)
-  )
+  if (active && (active.cwd !== workspace || active.provider !== shell.modelSelection.provider))
     throw new Refusal("identity_conflict", { shell, active });
   if (
     shell.session?.status === "error" ||
@@ -38,7 +36,7 @@ export function readManagedThread(
   if (running && !active?.activeTurnId)
     throw new Refusal("run_external_unknown", { shell, active });
   return {
-    workspace: shell.worktreePath ?? "",
+    workspace,
     provider: shell.session?.providerName ?? shell.modelSelection.provider,
     turn,
     running,

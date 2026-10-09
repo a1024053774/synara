@@ -142,21 +142,68 @@ export const A2AGateServiceLive = Layer.effect(
           }),
         );
       },
+      createAttachedThread: async (task, attachment, prompt) => {
+        const threadId = ThreadId.makeUnsafe(attachment.thread_id);
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.create",
+            commandId: commandId(),
+            threadId,
+            projectId: ProjectId.makeUnsafe(task.project_id),
+            title: `${attachment.role} · ${task.title ?? task.task_id}`,
+            modelSelection: attachment.modelSelection,
+            runtimeMode: attachment.runtime_mode,
+            interactionMode: "default",
+            envMode: "local",
+            branch: null,
+            worktreePath: null,
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: commandId(),
+            threadId,
+            message: {
+              messageId: MessageId.makeUnsafe(randomUUID()),
+              role: "user",
+              text: prompt,
+              attachments: [],
+            },
+            modelSelection: attachment.modelSelection,
+            runtimeMode: attachment.runtime_mode,
+            interactionMode: "default",
+            dispatchOrigin: "agent",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+      },
       readThread: async (thread) => {
-        const { value, sessions } = await bounded(
+        const { value, sessions, project } = await bounded(
           thread,
           Effect.gen(function* () {
             const sessions = yield* providers.listSessions();
             yield* settleProjection;
             const value = yield* query.getThreadShellById(ThreadId.makeUnsafe(thread));
-            return { value, sessions };
+            const project =
+              Option.isSome(value) && value.value.worktreePath === null
+                ? yield* query.getProjectShellById(value.value.projectId)
+                : Option.none();
+            return { value, sessions, project };
           }),
         );
         if (Option.isNone(value))
           throw new Refusal("run_external_unknown", "thread_identity_unknown");
         const shell = value.value;
         if (shell.id !== thread) throw new Refusal("identity_conflict");
-        return readManagedThread(shell, sessions);
+        if (shell.worktreePath === null && Option.isNone(project))
+          throw new Refusal("run_external_unknown", "project_identity_unknown");
+        return readManagedThread(
+          shell,
+          sessions,
+          shell.worktreePath ?? (Option.isSome(project) ? project.value.workspaceRoot : ""),
+        );
       },
       stopThread: async (thread) => {
         await Effect.runPromise(providers.stopSession({ threadId: ThreadId.makeUnsafe(thread) }));
