@@ -98,7 +98,7 @@ export const A2AGateServiceLive = Layer.effect(
             type: "project.create",
             commandId: commandId(),
             projectId: ProjectId.makeUnsafe(project),
-            title: "a2a pagination",
+            title: project,
             workspaceRoot: repo,
             createdAt: new Date().toISOString(),
           }),

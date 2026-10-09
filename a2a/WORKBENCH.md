@@ -12,6 +12,8 @@
 
 日常数据固定在 `~/Library/Application Support/a2a-workbench`：`userdata/` 保存设置、SQLite 与日志，`electron-profile/` 保存本工作台的 Electron profile。它们与官方 Synara 的数据分开。启动日志在 `workbench-launch.log`；`status` 只读，不创建目录。测试可通过 `A2A_WORKBENCH_DATA_DIR` 指定独立目录，日常使用应移除此变量。
 
+进程身份的写入与读取都在 `LC_ALL=C` 下采集完整的 `ps lstart` 和命令，调用者的 locale 不影响记录。身份不匹配时拒绝启动、停止和门禁调用；PID 已退出时报告未运行。更新启动器身份格式前须先用当前代码停止，再更新并启动，让启动器写出新记录。
+
 Codex 沿用 Synara 的正常 CODEX_HOME overlay：启动器保留用户 HOME 和已有 CODEX_HOME，不复制认证文件、不修改 `~/.codex`。Synara 自己在专用目录建立 overlay，使用已有登录；真实登录与模型调用不属于启动器的隔离验证。
 
 更新时先停止，按项目既定流程拉取 fork，然后再次启动。若需主动重建：
@@ -34,7 +36,7 @@ Codex 沿用 Synara 的正常 CODEX_HOME overlay：启动器保留用户 HOME �
 
 其他操作传现有 `A2AGateRequest` JSON；该脚本读取 `a2a-gates/endpoint.json`，再经 HTTP 调用 `packages/a2a-gates/src/cli.ts`，不直接操作门禁数据库。请求与回执保持原门禁契约。未启动、endpoint 权限不为 0600 或进程身份不匹配时拒绝调用。
 
-`create` 接受可选 `title`（省略时用 task id），并建立任务窗口条目；`dispatch` 自动归入 worker 会话。主控可用 `attach` 创建带角色的普通会话，例如：
+`create` 接受可选 `title`（省略时用 task id），并建立任务窗口条目；自动新建项目时用请求中的 `project` id 作为项目名，已有项目保留原名；`dispatch` 自动归入 worker 会话。主控可用 `attach` 创建带角色的普通会话，例如：
 
 ```sh
 ./a2a/scripts/gate '{"command":"attach","task":"TASK_ID","role":"reviewer","modelSelection":{"provider":"codex","model":"gpt-6.1-sol","options":{"reasoningEffort":"high","fastMode":true}},"runtimeMode":"approval-required","instructions":"/absolute/path/review.txt"}'

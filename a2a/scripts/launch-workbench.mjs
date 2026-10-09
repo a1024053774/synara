@@ -28,7 +28,7 @@ child.once("spawn", () => {
   const identity = execFileSync(
     "ps",
     ["-p", String(child.pid), "-o", "lstart=", "-o", "command="],
-    { encoding: "utf8" },
+    { encoding: "utf8", env: { ...process.env, LC_ALL: "C", LANG: "C" } },
   ).trim();
   writeFileSync(
     join(home, "workbench-process.json"),
