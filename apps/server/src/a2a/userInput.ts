@@ -30,6 +30,8 @@ export function userCommandInput(
     case "thread.task.stop":
     case "thread.archive":
     case "thread.unarchive":
+    case "thread.message.edit-and-resend":
+    case "thread.checkpoint.revert":
       form = "action";
       break;
     default:
@@ -44,6 +46,7 @@ export function userCommandInput(
     target: {
       ...gates.userInputTarget(command.threadId, project),
       turn: "turnId" in command ? (command.turnId ?? null) : null,
+      message: "messageId" in command ? command.messageId : null,
       request,
     },
     channel: command.origin === "ui-derived" ? "ui-derived" : "ws-rpc",

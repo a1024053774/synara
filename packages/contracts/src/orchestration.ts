@@ -1810,6 +1810,7 @@ const ThreadUserInputRespondCommand = Schema.Struct({
 });
 
 const ThreadCheckpointRevertCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.checkpoint.revert"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -1828,6 +1829,7 @@ const ThreadConversationRollbackCommand = Schema.Struct({
 });
 
 const ThreadMessageEditAndResendCommand = Schema.Struct({
+  origin: Schema.optional(Schema.Literal("ui-derived")),
   type: Schema.Literal("thread.message.edit-and-resend"),
   commandId: CommandId,
   threadId: ThreadId,

@@ -32,7 +32,8 @@ export function humanInterventions(
       !details.thread_id ||
       (details.form === undefined || details.form === "message" || details.form === "answer"
         ? typeof details.message_id !== "string" || !details.message_id
-        : details.message_id !== null) ||
+        : details.message_id !== null &&
+          (typeof details.message_id !== "string" || !details.message_id)) ||
       typeof details.attempt_id !== "string" ||
       !details.attempt_id ||
       typeof details.text !== "string"

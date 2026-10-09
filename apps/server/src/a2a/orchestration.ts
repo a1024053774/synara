@@ -119,6 +119,8 @@ export const installUserInputRecording = Effect.fn("a2a.installUserInputRecordin
     "thread.task-stop-requested",
     "thread.archived",
     "thread.unarchived",
+    "thread.message-edit-resend-requested",
+    "thread.checkpoint-revert-requested",
   ]);
   const projects = new Map<string, string>();
   const answers = new Map<string, { request: string; content: unknown }>();
