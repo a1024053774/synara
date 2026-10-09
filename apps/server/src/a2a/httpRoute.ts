@@ -1,4 +1,4 @@
-import { A2AGateRequest } from "@synara/contracts";
+import { A2ARequest } from "@synara/contracts";
 import { Effect, Layer, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { A2AGateService } from "./service";
@@ -76,7 +76,7 @@ const route = Effect.gen(function* () {
   const body = yield* readMcpJsonBody(request);
   if (body.kind !== "ok")
     return HttpServerResponse.jsonUnsafe({ ok: false, error: "invalid_body" }, { status: 400 });
-  const args = yield* Schema.decodeUnknownEffect(A2AGateRequest)(body.body);
+  const args = yield* Schema.decodeUnknownEffect(A2ARequest)(body.body);
   return HttpServerResponse.jsonUnsafe(yield* Effect.promise(() => gates.call(args)), { headers });
 }).pipe(
   Effect.catch((error) =>

@@ -8,7 +8,13 @@ export type AgentGatewayCapability =
   | "diagnostics:read"
   | "browser:control"
   | "device:control"
-  | "computer:control";
+  | "computer:control"
+  | "a2a:operate"
+  | "a2a:read"
+  | "a2a:inbox"
+  | "a2a:stop"
+  | "a2a:submit"
+  | "a2a:raise";
 
 export interface AgentGatewaySessionIdentity {
   readonly sessionKey: string;

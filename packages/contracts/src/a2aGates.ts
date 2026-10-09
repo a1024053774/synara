@@ -1,6 +1,13 @@
 import { Schema } from "effect";
 import { ModelSelection } from "./orchestration";
 import { A2AMemberRole } from "./a2aMembership";
+import {
+  A2ASessionPreset,
+  A2AInboxRequest,
+  A2AStopRequest,
+  type A2AInboxEntry,
+  type A2AInboxDelivery,
+} from "./a2aInbox";
 
 export const A2AIssueAction = Schema.Literals([
   "close",
@@ -39,6 +46,7 @@ export const A2AGateRequest = Schema.Struct({
   title: Schema.optional(Schema.String),
   thread: Schema.optional(Schema.String),
   role: Schema.optional(A2AMemberRole),
+  preset: Schema.optional(A2ASessionPreset),
   modelSelection: Schema.optional(ModelSelection),
   base: Schema.optional(Schema.String),
   oracle: Schema.optional(Schema.String),
@@ -60,8 +68,10 @@ export const A2AGateRequest = Schema.Struct({
   mode: Schema.optional(Schema.Literals(["bundle", "individual"])),
   action: Schema.optional(A2AIssueAction),
   basis: Schema.optional(Schema.String),
+  body: Schema.optional(Schema.String),
 });
 export type A2AGateRequest = typeof A2AGateRequest.Type;
+export const A2ARequest = Schema.Union([A2AGateRequest, A2AInboxRequest, A2AStopRequest]);
 
 export interface A2AAttempt {
   task_id: string;
@@ -144,6 +154,7 @@ export interface A2AAttachment {
   runtime_mode: "approval-required" | "full-access";
   state: "creating" | "active" | "ended";
   ended_at?: string;
+  preset?: A2ASessionPreset;
 }
 
 export interface A2ARun {
@@ -190,6 +201,10 @@ export interface A2AGateResult {
   records?: ReadonlyArray<A2AIssueRecord>;
   issues?: ReadonlyArray<A2AIssueView>;
   user_inputs?: ReadonlyArray<A2AUserInput>;
+  entry?: A2AInboxEntry;
+  delivery?: A2AInboxDelivery;
+  entries?: ReadonlyArray<{ entry: A2AInboxEntry; delivery?: A2AInboxDelivery }>;
+  interruptRequested?: boolean;
 }
 
 export interface A2AIssueRecord {
@@ -203,7 +218,7 @@ export interface A2AIssueRecord {
   created_at: string;
   body: string;
   task_id: string;
-  attempt_id: string;
+  attempt_id: string | null;
   thread_id: string;
   turn_id: string;
   number: number;

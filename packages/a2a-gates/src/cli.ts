@@ -1,12 +1,15 @@
 import { parseArgs } from "node:util";
-import { A2AGateRequest } from "@synara/contracts";
+import { A2ARequest } from "@synara/contracts";
 import { Schema } from "effect";
 import { A2AGates, Refusal, type GateRuntime } from "./core";
 
 const commands: Record<string, { required: string[]; optional?: string[] }> = {
   create: { required: ["repo", "base", "oracle", "instructions"], optional: ["project", "title"] },
   dispatch: { required: ["runtime-mode"] },
-  attach: { required: ["role", "model-selection", "instructions", "runtime-mode"] },
+  attach: {
+    required: ["role", "model-selection", "instructions", "runtime-mode"],
+    optional: ["preset"],
+  },
   run: { required: ["runtime-mode", "wait-seconds"] },
   claim: { required: ["owner"] },
   revoke: { required: ["reason"] },
@@ -21,6 +24,13 @@ const commands: Record<string, { required: string[]; optional?: string[] }> = {
   answer_issues: { required: ["answers"], optional: ["mode"] },
   disposition: { required: ["issue", "action"], optional: ["reason", "basis"] },
   reclaim: { required: [], optional: ["attempt", "thread"] },
+  inbox_send: {
+    required: ["from", "to", "kind", "body"],
+    optional: ["reply-to", "refs", "title", "blocking", "action", "reason", "basis", "bundle-id"],
+  },
+  inbox_list: { required: ["role"] },
+  inbox_ack: { required: ["role", "id"], optional: ["body"] },
+  stop: { required: ["thread", "stop-id"] },
 };
 
 async function emit(result: unknown) {
@@ -41,7 +51,7 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
       );
       return 2;
     }
-    const request = Schema.decodeUnknownSync(A2AGateRequest)(JSON.parse(json));
+    const request = Schema.decodeUnknownSync(A2ARequest)(JSON.parse(json));
     const url = new URL("/api/a2a", endpoint);
     url.searchParams.set("token", process.env.A2A_GATE_BEARER);
     const response = await fetch(url, {
@@ -89,6 +99,17 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
       "mode",
       "action",
       "basis",
+      "preset",
+      "from",
+      "to",
+      "kind",
+      "body",
+      "reply-to",
+      "refs",
+      "blocking",
+      "id",
+      "bundle-id",
+      "stop-id",
     ];
     const { values, positionals } = parseArgs({
       args: argv,
@@ -97,9 +118,15 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
     });
     const command = positionals[0] ?? "";
     const contract = commands[command];
-    if (!contract || positionals.length !== 1 || !values.state || !values.task)
+    const inbox = command.startsWith("inbox_") || command === "stop";
+    if (!contract || positionals.length !== 1 || !values.state || (!inbox && !values.task))
       throw new Error("state, command and task required");
-    const allowed = ["state", "task", ...contract.required, ...(contract.optional ?? [])];
+    const allowed = [
+      "state",
+      ...(!inbox ? ["task"] : []),
+      ...contract.required,
+      ...(contract.optional ?? []),
+    ];
     if (
       Object.keys(values).some((key) => !allowed.includes(key)) ||
       contract.required.some((key) => values[key] === undefined)
@@ -119,6 +146,12 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
         request[key.replaceAll("-", "_")] = Number(value);
       } else if (key === "model-selection") request.modelSelection = JSON.parse(value!);
       else if (key === "answers") request.answers = JSON.parse(value!);
+      else if (key === "refs") request.refs = JSON.parse(value!);
+      else if (key === "blocking") {
+        if (value !== "true" && value !== "false") throw new Error("boolean required: blocking");
+        request.blocking = value === "true";
+      } else if (["reply-to", "bundle-id", "stop-id"].includes(key))
+        request[key.replaceAll("-", "_")] = value;
       else request[key === "runtime-mode" ? "runtimeMode" : key] = value;
     }
   } catch (error) {

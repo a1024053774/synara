@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { A2AMembership } from "@synara/a2a-gates/membership";
+import type { A2ASessionPreset } from "@synara/contracts";
 
-import { Layer } from "effect";
+import { Effect, Layer } from "effect";
+import { ServerConfig } from "../../config";
+import { a2aCapabilities } from "../../a2a/capabilities";
 
 import {
   AgentGatewaySessionRegistry,
@@ -22,6 +27,7 @@ const PROVIDER_SESSION_CAPABILITIES = [
 export function makeAgentGatewaySessionRegistry(options?: {
   readonly now?: () => number;
   readonly randomId?: () => string;
+  readonly a2aPresetForThread?: (thread: string) => A2ASessionPreset | undefined;
 }): AgentGatewaySessionRegistryShape {
   const now = options?.now ?? Date.now;
   const randomId = options?.randomId ?? randomUUID;
@@ -74,14 +80,15 @@ export function makeAgentGatewaySessionRegistry(options?: {
       const issuedAt = now();
       const sessionKey = `gateway-session:${randomId()}`;
       const token = `sagw_session_${randomId()}`;
+      const preset = options?.a2aPresetForThread?.(threadId);
       const identity: AgentGatewaySessionIdentity = {
         sessionKey,
         threadId,
         provider,
         issuedAt,
         capabilities: new Set<AgentGatewayCapability>([
-          ...PROVIDER_SESSION_CAPABILITIES,
-          ...(issueOptions?.additionalCapabilities ?? []).filter(
+          ...(preset ? a2aCapabilities[preset] : PROVIDER_SESSION_CAPABILITIES),
+          ...(!preset ? (issueOptions?.additionalCapabilities ?? []) : []).filter(
             (capability) =>
               capability !== "computer:control" || !disabledComputerThreads.has(threadId),
           ),
@@ -141,7 +148,14 @@ export function makeAgentGatewaySessionRegistry(options?: {
   };
 }
 
-export const AgentGatewaySessionRegistryLive = Layer.sync(
+export const AgentGatewaySessionRegistryLive = Layer.effect(
   AgentGatewaySessionRegistry,
-  makeAgentGatewaySessionRegistry,
+  Effect.gen(function* () {
+    const config = yield* ServerConfig;
+    const bindings = new A2AMembership(join(config.stateDir, "a2a-gates"));
+    yield* Effect.addFinalizer(() => Effect.sync(() => bindings.close()));
+    return makeAgentGatewaySessionRegistry({
+      a2aPresetForThread: (thread) => bindings.presetForThread(thread),
+    });
+  }),
 );

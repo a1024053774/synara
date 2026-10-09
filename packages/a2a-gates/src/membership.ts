@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { A2ATaskMembership } from "@synara/contracts";
+import type { A2ATaskMembership, A2ASessionPreset } from "@synara/contracts";
 
 export class MembershipRefusal extends Error {
   constructor(readonly code: string) {
@@ -9,7 +9,7 @@ export class MembershipRefusal extends Error {
   }
 }
 
-/** Display grouping only. Gate state and attempt authority stay in A2AGates. */
+/** Grouping and selected session presets. Attempt authority stays in A2AGates. */
 export class A2AMembership {
   private readonly db: DatabaseSync;
 
@@ -17,11 +17,32 @@ export class A2AMembership {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(join(root, "membership.sqlite3"));
     this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL;
-      CREATE TABLE IF NOT EXISTS memberships (id TEXT PRIMARY KEY, data TEXT NOT NULL)`);
+      CREATE TABLE IF NOT EXISTS memberships (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_presets (thread TEXT PRIMARY KEY, preset TEXT NOT NULL)`);
   }
 
   close() {
     this.db.close();
+  }
+
+  bindPreset(thread: string, preset: A2ASessionPreset): void {
+    this.db
+      .prepare(
+        "INSERT INTO session_presets(thread,preset) VALUES (?,?) ON CONFLICT(thread) DO UPDATE SET preset=excluded.preset",
+      )
+      .run(thread, preset);
+  }
+
+  presetForThread(thread: string): A2ASessionPreset | undefined {
+    const row = this.db.prepare("SELECT preset FROM session_presets WHERE thread=?").get(thread);
+    return row?.preset as A2ASessionPreset | undefined;
+  }
+
+  presetThreads(preset: string): ReadonlyArray<string> {
+    return this.db
+      .prepare("SELECT thread FROM session_presets WHERE preset=? ORDER BY thread")
+      .all(preset)
+      .map((row) => String(row.thread));
   }
 
   list(project?: string): ReadonlyArray<A2ATaskMembership> {

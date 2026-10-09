@@ -232,6 +232,45 @@ export const A2AGateServiceLive = Layer.effect(
           }),
         );
       },
+      wakeThread: async (thread, entry) => {
+        const value = await Effect.runPromise(
+          query.getThreadShellById(ThreadId.makeUnsafe(thread)),
+        );
+        if (Option.isNone(value) || value.value.archivedAt !== null)
+          throw new Refusal("session_ended");
+        const shell = value.value;
+        const message = randomUUID();
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.makeUnsafe(`a2a:inbox:${entry.id}`),
+            threadId: shell.id,
+            message: {
+              messageId: MessageId.makeUnsafe(message),
+              role: "user",
+              text: `收件箱 ${entry.id}：${entry.body.split(/\r?\n/, 1)[0] ?? ""}`,
+              attachments: [],
+            },
+            modelSelection: shell.modelSelection,
+            runtimeMode: shell.runtimeMode,
+            interactionMode: shell.interactionMode,
+            dispatchOrigin: "agent",
+            dispatchMode: "queue",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+        return { message };
+      },
+      interruptThread: async (thread) => {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.interrupt",
+            commandId: commandId(),
+            threadId: ThreadId.makeUnsafe(thread),
+            createdAt: new Date().toISOString(),
+          }),
+        );
+      },
       stopThread: async (thread) => {
         await Effect.runPromise(providers.stopSession({ threadId: ThreadId.makeUnsafe(thread) }));
         await Effect.runPromise(

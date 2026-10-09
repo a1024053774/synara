@@ -1,3 +1,44 @@
+# 角色预设与主控收件箱
+
+attach 的 `role` 保存任务归属，`preset` 选择固定的 MCP 工具集合。两种主控的 role 都是 `controller`，preset 分别是 `executor` 和 `ideation`；worker、reviewer、monitor 默认使用同名预设。例：
+
+```json
+{
+  "command": "attach",
+  "task": "CONTROL_TASK",
+  "role": "controller",
+  "preset": "executor",
+  "modelSelection": { "provider": "codex", "model": "gpt-6.1-sol" },
+  "runtimeMode": "full-access",
+  "instructions": "/absolute/path/role-card.txt"
+}
+```
+
+预设在首次 turn 前绑定并持久保存；每次签发凭据复制其能力，改变预设不修改已签发凭据，须重新签发。未选择 a2a 预设的原生会话保留 Synara 的六种通用能力。预设会话不获得通用 `thread:write`，也不因 provider 的可选能力配置获得额外工具。没有自由编辑能力的接口。
+
+| 预设               | MCP 工具                                                                                                                                                                                       |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| executor           | a2a_create、a2a_claim、a2a_dispatch、a2a_attach、a2a_verify、a2a_integrate、a2a_reclaim、a2a_run、a2a_revoke、a2a_revise；a2a_status、a2a_events、a2a_issues；a2a_disposition；三个 inbox 工具 |
+| ideation           | a2a_status、a2a_events、a2a_issues；a2a_disposition；三个 inbox 工具；a2a_stop                                                                                                                 |
+| worker             | a2a_submit、a2a_raise                                                                                                                                                                          |
+| reviewer / monitor | a2a_raise                                                                                                                                                                                      |
+
+operate 包含 read 权限，以便同名只读工具供两个主控使用；inbox 包含已定义的主控问题处置。a2a_disposition 保留原接口。所有门禁业务仍由同一核心负责，保持 task 操作锁、fence、CAS 与 attempt 绑定。HTTP 与 CLI 的 owner 入口供人工操作者使用；MCP 的角色来自固定凭据，不能从参数指定。
+
+收件箱命令 `inbox_send`、`inbox_list`、`inbox_ack` 可经同一 `/api/a2a` HTTP 或现有 CLI 调用。MCP 名称为 `a2a_inbox_send`、`a2a_inbox_list`、`a2a_inbox_ack`。send 使用 kind、from、to、reply_to、refs、body 及相应的 issue/disposition/answer 字段；服务端产生 UUID、schema=1 和带时区的 created_at。MCP 忽略参数伪造的 sender/role。例：
+
+```json
+{"command":"inbox_send","from":"ideation","to":"executor","kind":"assign","refs":["ticket:T-058"],"body":"本批就绪 ticket 与授权原文"}
+{"command":"inbox_list","role":"executor"}
+{"command":"inbox_ack","role":"executor","id":"ENTRY_UUID"}
+```
+
+种类为 assign、revise、cancel、stop、report、needs-decision、issue、disposition、answer、ack。原条目和送达回执只追加，SQL 拒绝 UPDATE/DELETE；确认是指向原条目的新 ack，只有原收件人可以确认，ack 是终结，重复确认不产生新条目或重复唤醒。未确认列表也包含已有 issue 记录中的 executor 转交；不迁移 Herdr 文件，不双写。
+
+写入后只尝试一次唤醒。唯一活跃归属的目标会话收到带条目 id 与首行摘要的 agent 来源消息，忙时排队；不产生用户输入。无目标、多目标或目标已结束时保留条目及 undelivered 回执，返回非成功。未知外部错误记 unknown；进程中断留下 pending，不能当作成功，也不自动重送。ack 可能已保存，但向原发送方的唤醒未送达；回执分别保留这两个事实。读取、重启和重复 ack 不重新唤醒。
+
+a2a_stop 只请求 `thread.turn.interrupt`，不停止 session、不归档、不回收、不验收、不集成。参数为 thread、stop_id；目标须是当前受管或 active attach 的 worker/reviewer/monitor。stop 条目须从 user/ideation 发给 executor，refs 指向该 thread 或其当前 attempt，超过两分钟且没有 executor ack。检查与中断请求持有目标 task 锁及该 stop 条目锁。返回 interruptRequested 只表示原生请求已受理，实际 turn 状态须另行读回；构思主控仍须按角色卡取得用户当时的停止授权。
+
 # 问题上报与答复
 
 问题、答复和处置均写入追加式记录，状态从最后一条记录与读取时钟派生。无处置的判断期为 15 分钟；`forward` 从转交时重新计 15 分钟；`snooze` 为 1 小时。`close`、`dismiss`、答复送出分别派生为已关闭、已关闭、已送达。`reopen` 与 `needs-user` 开始新的答复周期，旧答复仍保留在记录链与用户输入中。

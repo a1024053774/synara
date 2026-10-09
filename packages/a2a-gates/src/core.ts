@@ -4,6 +4,10 @@ import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   A2AGateRequest,
+  A2AInboxRequest,
+  A2AStopRequest,
+  type A2AInboxEntry,
+  type A2AInboxDelivery,
   type A2AAttempt,
   type A2ARun,
   type A2AUserInputObserver,
@@ -72,11 +76,14 @@ export interface GateRuntime {
   archiveThread(thread: string): Promise<void>;
   createAttachedThread?(task: A2ATask, attachment: A2AAttachment, prompt: string): Promise<void>;
   sendUserAnswer?(thread: string, messageId: string, message: string): Promise<void>;
+  wakeThread?(thread: string, entry: A2AInboxEntry): Promise<{ message: string }>;
+  interruptThread?(thread: string): Promise<void>;
 }
 export interface SubmitCaller {
   thread: string;
   turn: string;
   assertActive(): Promise<void>;
+  address?: string;
 }
 
 /** The sole mutation owner. Thread lifecycle signals never invoke this core. */
@@ -106,6 +113,12 @@ export class A2AGates {
       CREATE TRIGGER IF NOT EXISTS user_input_ingress_no_update BEFORE UPDATE ON user_input_ingress BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS user_input_ingress_no_delete BEFORE DELETE ON user_input_ingress BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TABLE IF NOT EXISTS issue_records (id TEXT PRIMARY KEY, task TEXT NOT NULL, thread TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS inbox_records (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS inbox_records_no_update BEFORE UPDATE ON inbox_records BEGIN SELECT RAISE(ABORT,'append only'); END;
+      CREATE TRIGGER IF NOT EXISTS inbox_records_no_delete BEFORE DELETE ON inbox_records BEGIN SELECT RAISE(ABORT,'append only'); END;
+      CREATE TABLE IF NOT EXISTS inbox_deliveries (seq INTEGER PRIMARY KEY AUTOINCREMENT, entry TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS inbox_deliveries_no_update BEFORE UPDATE ON inbox_deliveries BEGIN SELECT RAISE(ABORT,'append only'); END;
+      CREATE TRIGGER IF NOT EXISTS inbox_deliveries_no_delete BEFORE DELETE ON inbox_deliveries BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TABLE IF NOT EXISTS user_inputs (id TEXT PRIMARY KEY, task TEXT, message TEXT, data TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS issue_records_no_update BEFORE UPDATE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS issue_records_no_delete BEFORE DELETE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
@@ -555,25 +568,28 @@ export class A2AGates {
     input: { title: string; body: string; blocking: boolean; refs: ReadonlyArray<string> },
     caller: SubmitCaller,
   ) {
-    const task = this.taskForThread(caller.thread);
-    requireGate(task, "stale_thread");
+    const binding = this.ownedThread(caller.thread);
+    requireGate(
+      binding && ["worker", "reviewer", "monitor"].includes(binding.role),
+      "stale_thread",
+    );
+    const task = binding.task;
     const lock = this.operationLock(task.task_id);
     try {
       this.checkUserInputObserver();
       const current = this.load(task.task_id);
-      const attempt = current.current_attempt;
-      requireGate(
-        attempt && attempt.thread_id === caller.thread && !attempt.reclaimed,
-        "stale_thread",
-      );
+      const attempt = binding.attempt;
+      if (attempt)
+        requireGate(current.current_attempt?.attempt_id === attempt.attempt_id, "stale_thread");
       requireGate(input.title.trim().length > 0, "invalid_title");
       await caller.assertActive();
       requireGate(this.runtime, "native_runtime_required");
       const live = await this.runtime.readThread(caller.thread);
       requireGate(
         !live.error &&
-          live.workspace === attempt.workspace &&
-          live.provider === "codex" &&
+          live.workspace === (attempt?.workspace ?? task.repo) &&
+          live.provider === (binding.attachment?.modelSelection.provider ?? "codex") &&
+          !live.archived &&
           live.running &&
           !live.blocked &&
           live.turn === caller.turn,
@@ -593,12 +609,12 @@ export class A2AGates {
         id: issueId,
         schema: 1,
         kind: "issue",
-        from: `worker:${caller.thread}`,
+        from: `${binding.role}:${caller.thread}`,
         to: "triage",
         reply_to: null,
         refs: [
           `task:${task.task_id}`,
-          `attempt:${attempt.attempt_id}`,
+          ...(attempt ? [`attempt:${attempt.attempt_id}`] : []),
           `thread:${caller.thread}`,
           `turn:${caller.turn}`,
           ...input.refs,
@@ -606,7 +622,7 @@ export class A2AGates {
         created_at: new Date(this.now()).toISOString(),
         body: input.body,
         task_id: task.task_id,
-        attempt_id: attempt.attempt_id,
+        attempt_id: attempt?.attempt_id ?? null,
         thread_id: caller.thread,
         turn_id: caller.turn,
         number,
@@ -626,14 +642,18 @@ export class A2AGates {
       lock.close();
     }
   }
-  private disposeIssue(args: A2AGateRequest, caller?: SubmitCaller): A2AGateResult {
+  private async disposeIssue(
+    args: A2AGateRequest,
+    caller?: SubmitCaller,
+    actor = caller ? (caller.address ?? `controller:${caller.thread}`) : "user",
+  ): Promise<A2AGateResult> {
     const view = this.readIssues(args.task).issues.find((entry) => entry.issue.id === args.issue);
     requireGate(view, "unknown_issue");
     requireGate(args.action, "invalid_action");
     if (args.action === "dismiss" || args.action === "snooze" || args.action === "reopen")
-      requireGate(!caller, "user_required");
+      requireGate(actor === "user", "user_required");
     if (args.action === "close") {
-      requireGate(!view.issue.blocking || !caller, "blocking_requires_user");
+      requireGate(!view.issue.blocking || actor === "user", "blocking_requires_user");
       requireGate(args.reason?.trim() && args.basis?.trim(), "close_requires_reason_basis");
     }
     if (args.action === "delivered")
@@ -649,12 +669,12 @@ export class A2AGates {
           ),
         "delivery_unconfirmed",
       );
-    this.appendIssue({
+    const record: A2AIssueRecord = {
       ...view.issue,
       id: randomUUID(),
       kind: "disposition",
       action: args.action,
-      from: caller ? `controller:${caller.thread}` : "user",
+      from: actor,
       to:
         args.action === "forward"
           ? "ideation"
@@ -662,7 +682,7 @@ export class A2AGates {
             ? "user"
             : "triage",
       reply_to: view.issue.id,
-      body: args.reason ?? (args.action === "dismiss" ? "用户选择不处理" : ""),
+      body: args.body ?? args.reason ?? (args.action === "dismiss" ? "用户选择不处理" : ""),
       ...(args.reason !== undefined || args.action === "dismiss"
         ? { reason: args.reason ?? "用户选择不处理" }
         : {}),
@@ -682,8 +702,18 @@ export class A2AGates {
         `issue:${view.issue.id}`,
         ...(caller ? [`actor-thread:${caller.thread}`] : []),
       ],
-    });
-    return { ok: true, ...this.readIssues(args.task) };
+    };
+    this.appendIssue(record);
+    const delivery =
+      record.to === "ideation" || record.to === "executor"
+        ? await this.deliverInbox(record)
+        : undefined;
+    return {
+      ok: true,
+      ...this.readIssues(args.task),
+      entry: record,
+      ...(delivery ? { delivery } : {}),
+    };
   }
   private async answerIssues(args: A2AGateRequest): Promise<A2AGateResult> {
     const replies =
@@ -801,21 +831,22 @@ export class A2AGates {
             bundle_id: group.bundleId,
             question: { number: issue.number, title: issue.title, body: issue.body },
           });
-          this.event(
-            issue.task_id,
-            "human_intervention",
-            {
-              input_id: inputId,
-              event_id: inputId,
-              task_id: issue.task_id,
-              attempt_id: issue.attempt_id,
-              thread_id: issue.thread_id,
-              message_id: group.messageId,
-              dispatch_origin: "user",
-              text: group.message,
-            },
-            issue.attempt_id,
-          );
+          if (issue.attempt_id)
+            this.event(
+              issue.task_id,
+              "human_intervention",
+              {
+                input_id: inputId,
+                event_id: inputId,
+                task_id: issue.task_id,
+                attempt_id: issue.attempt_id,
+                thread_id: issue.thread_id,
+                message_id: group.messageId,
+                dispatch_origin: "user",
+                text: group.message,
+              },
+              issue.attempt_id,
+            );
           group.answers.push(record);
         }
       this.db.exec("COMMIT");
@@ -824,11 +855,14 @@ export class A2AGates {
     }
     for (const group of groups) {
       const current = this.load(args.task).current_attempt;
+      const binding = this.ownedThread(group.thread);
       let action: "delivered" | "forward" = "forward";
       if (
-        current &&
-        current.attempt_id === group.replies[0]!.issue.attempt_id &&
-        !current.reclaimed
+        (current &&
+          current.thread_id === group.thread &&
+          current.attempt_id === group.replies[0]!.issue.attempt_id &&
+          !current.reclaimed) ||
+        (binding?.attachment && group.replies[0]!.issue.attempt_id === null)
       ) {
         try {
           await this.runtime.sendUserAnswer(group.thread, group.messageId, group.message);
@@ -850,8 +884,8 @@ export class A2AGates {
           if (!(error instanceof Refusal) || error.code !== "session_ended") throw error;
         }
       }
-      for (const record of group.answers)
-        this.appendIssue({
+      for (const record of group.answers) {
+        const disposition: A2AIssueRecord = {
           ...record,
           id: randomUUID(),
           kind: "disposition",
@@ -862,7 +896,10 @@ export class A2AGates {
           ...(action === "forward" ? { reason: "session-ended" } : {}),
           action,
           created_at: new Date(this.now()).toISOString(),
-        });
+        };
+        this.appendIssue(disposition);
+        if (action === "forward") await this.deliverInbox(disposition);
+      }
     }
     return { ok: true, ...this.readIssues(args.task) };
   }
@@ -1298,7 +1335,366 @@ export class A2AGates {
     }
   }
 
+  private inboxRecords(): A2AInboxEntry[] {
+    return [
+      ...this.db.prepare("SELECT data FROM inbox_records ORDER BY rowid").all(),
+      ...this.db.prepare("SELECT data FROM issue_records ORDER BY rowid").all(),
+    ].map((row) => JSON.parse(String(row.data)) as A2AInboxEntry);
+  }
+  private inboxEntry(entryId: string): A2AInboxEntry {
+    const entry = this.inboxRecords().find((record) => record.id === entryId);
+    requireGate(entry, "unknown_inbox_entry");
+    return entry;
+  }
+  private inboxConfirmed(entryId: string, role: string): boolean {
+    return this.inboxRecords().some(
+      (record) => record.kind === "ack" && record.from === role && record.reply_to === entryId,
+    );
+  }
+  private inboxIssueWaiting(issue: A2AInboxEntry, records: ReadonlyArray<A2AInboxEntry>): boolean {
+    const native = this.db.prepare("SELECT task FROM issue_records WHERE id=?").get(issue.id);
+    if (native)
+      return (
+        this.readIssues(String(native.task)).issues.find((view) => view.issue.id === issue.id)
+          ?.state === "等你决定"
+      );
+    const last = records
+      .filter(
+        (entry) =>
+          (entry.kind === "disposition" || entry.kind === "answer") &&
+          (entry.reply_to === issue.id || entry.refs.includes(`issue:${issue.id}`)),
+      )
+      .at(-1);
+    if (!last)
+      return Boolean(issue.blocking) || this.now() - Date.parse(issue.created_at) >= 900_000;
+    if (last.kind === "answer" || ["close", "dismiss", "delivered"].includes(last.action ?? ""))
+      return false;
+    if (last.action === "forward") return this.now() - Date.parse(last.created_at) >= 900_000;
+    if (last.action === "snooze") return this.now() - Date.parse(last.created_at) >= 3_600_000;
+    return true;
+  }
+  private appendInbox(entry: A2AInboxEntry): void {
+    this.db
+      .prepare("INSERT INTO inbox_records(id,data) VALUES (?,?)")
+      .run(entry.id, JSON.stringify(entry));
+  }
+  private inboxDelivery(entry: string): A2AInboxDelivery | undefined {
+    const row = this.db
+      .prepare("SELECT data FROM inbox_deliveries WHERE entry=? ORDER BY seq DESC LIMIT 1")
+      .get(entry);
+    return row ? (JSON.parse(String(row.data)) as A2AInboxDelivery) : undefined;
+  }
+  private appendDelivery(receipt: A2AInboxDelivery): void {
+    this.db
+      .prepare("INSERT INTO inbox_deliveries(entry,data) VALUES (?,?)")
+      .run(receipt.entry_id, JSON.stringify(receipt));
+  }
+  private ownedThread(thread: string) {
+    const task = this.taskForThread(thread);
+    if (task?.current_attempt && !task.current_attempt.reclaimed)
+      return { task, role: "worker", attempt: task.current_attempt };
+    const row = this.db.prepare("SELECT data FROM attachments WHERE id=?").get(thread);
+    const attached = row ? (JSON.parse(String(row.data)) as A2AAttachment) : undefined;
+    if (attached?.state === "active")
+      return { task: this.load(attached.task_id), role: attached.role, attachment: attached };
+    return undefined;
+  }
+  private async deliverInbox(entry: A2AInboxEntry): Promise<A2AInboxDelivery> {
+    const lock = this.operationLock(`inbox-${entry.id}`);
+    try {
+      const previous = this.inboxDelivery(entry.id);
+      // A persisted pending receipt is unknown, not permission to send again.
+      if (previous) return previous;
+      const created_at = new Date(this.now()).toISOString();
+      this.appendDelivery({ state: "pending", entry_id: entry.id, created_at });
+      let receipt: A2AInboxDelivery;
+      try {
+        requireGate(this.runtime?.wakeThread, "wake_runtime_required");
+        const targets = this.membership
+          .presetThreads(entry.to)
+          .filter((thread) => this.ownedThread(thread));
+        if (entry.to.includes(":")) {
+          const [role, thread] = entry.to.split(":");
+          if (thread && this.ownedThread(thread)?.role === role) targets.push(thread);
+        }
+        requireGate(
+          targets.length === 1,
+          targets.length ? "ambiguous_role_session" : "role_session_missing",
+        );
+        const thread = targets[0]!;
+        const result = await this.runtime.wakeThread(thread, entry);
+        receipt = {
+          state: "delivered",
+          entry_id: entry.id,
+          created_at: new Date(this.now()).toISOString(),
+          thread,
+          message: result.message,
+        };
+      } catch (error) {
+        // Delivery is the external boundary. Preserve the entry and a failure
+        // receipt, without a retry, replacement target, or success claim.
+        receipt = {
+          state: error instanceof Refusal ? "undelivered" : "unknown",
+          entry_id: entry.id,
+          created_at: new Date(this.now()).toISOString(),
+          reason: error instanceof Refusal ? error.code : String(error),
+        };
+      }
+      this.appendDelivery(receipt);
+      return receipt;
+    } finally {
+      lock.close();
+    }
+  }
+  private async inboxCall(args: A2AInboxRequest, caller?: SubmitCaller): Promise<A2AGateResult> {
+    const role = caller?.address ?? args.role ?? args.from ?? "user";
+    requireGate(
+      /^(?:user|ideation|executor|system|triage|(?:worker|reviewer|monitor):[A-Za-z0-9_.-]+)$/.test(
+        role,
+      ),
+      "invalid_address",
+    );
+    if (caller && args.command !== "inbox_list") await caller.assertActive();
+    if (args.command === "inbox_list") {
+      const records = this.inboxRecords();
+      return {
+        ok: true,
+        entries: records
+          .filter(
+            (entry) =>
+              entry.kind !== "ack" &&
+              (role === "user"
+                ? entry.kind === "issue" && this.inboxIssueWaiting(entry, records)
+                : (entry.to === role ||
+                    (entry.kind === "issue" &&
+                      entry.to === "triage" &&
+                      ["ideation", "executor"].includes(role))) &&
+                  !this.inboxConfirmed(entry.id, role)),
+          )
+          .map((entry) => {
+            const delivery = this.inboxDelivery(entry.id);
+            return { entry, ...(delivery ? { delivery } : {}) };
+          }),
+      };
+    }
+    this.checkUserInputObserver();
+    if (args.command === "inbox_ack" || args.kind === "ack") {
+      const original = this.inboxEntry(args.id ?? args.reply_to ?? "");
+      requireGate(original.kind !== "ack", "ack_is_terminal");
+      requireGate(original.to === role, "recipient_required");
+      if (args.command === "inbox_send")
+        requireGate(args.to === original.from, "recipient_required");
+      const lock = this.operationLock(`inbox-${original.id}`);
+      let ack: A2AInboxEntry;
+      try {
+        const previous = this.inboxRecords().find(
+          (entry) => entry.kind === "ack" && entry.from === role && entry.reply_to === original.id,
+        );
+        if (previous) {
+          const delivery = this.inboxDelivery(previous.id);
+          return {
+            ok: delivery?.state === "delivered",
+            entry: previous,
+            ...(delivery ? { delivery } : {}),
+            ...(delivery?.state !== "delivered" ? { error: "wake_undelivered" } : {}),
+          };
+        }
+        ack = {
+          id: randomUUID(),
+          schema: 1,
+          kind: "ack",
+          from: role,
+          to: original.from,
+          reply_to: original.id,
+          refs: [],
+          created_at: new Date(this.now()).toISOString(),
+          body: args.body ?? "确认收到。",
+        };
+        this.appendInbox(ack);
+      } finally {
+        lock.close();
+      }
+      const delivery = await this.deliverInbox(ack);
+      return {
+        ok: delivery.state === "delivered",
+        entry: ack,
+        delivery,
+        ...(delivery.state !== "delivered" ? { error: "wake_undelivered" } : {}),
+      };
+    }
+    requireGate(
+      !args.id && args.kind && args.to && args.body !== undefined,
+      "inbox_arguments_required",
+    );
+    requireGate(
+      /^(?:user|ideation|executor|system|triage|(?:worker|reviewer|monitor):[A-Za-z0-9_.-]+)$/.test(
+        args.to,
+      ),
+      "invalid_address",
+    );
+    requireGate(
+      (args.refs ?? []).every((ref) =>
+        /^(?:ticket|task|attempt|thread|turn|message|request|input|issue|file|commit|worker):.+$/.test(
+          ref,
+        ),
+      ),
+      "invalid_reference",
+    );
+    const parent = args.reply_to ? this.inboxEntry(args.reply_to) : undefined;
+    if (args.kind === "issue")
+      requireGate(args.title?.trim() && args.to === "triage", "invalid_issue");
+    else requireGate(!args.blocking, "blocking_only_for_issue");
+    if (args.kind !== "answer")
+      requireGate(
+        args.certainty === undefined && args.bundle_id === undefined,
+        "answer_fields_only_for_answer",
+      );
+    if (args.kind !== "disposition")
+      requireGate(
+        args.action === undefined && args.reason === undefined && args.basis === undefined,
+        "disposition_fields_only_for_disposition",
+      );
+    if (args.kind === "disposition") {
+      requireGate(parent?.kind === "issue" && args.action, "disposition_requires_issue");
+      requireGate(
+        ["executor", "ideation", "user", "system"].includes(role),
+        "disposition_sender_required",
+      );
+      if (args.action === "close" || args.action === "dismiss")
+        requireGate(!parent.blocking || role === "user", "blocking_requires_user");
+      if (args.action === "dismiss") requireGate(role === "user", "user_required");
+      if (args.action === "close")
+        requireGate(args.reason?.trim() && args.basis?.trim(), "close_requires_reason_basis");
+      const legacy = this.db.prepare("SELECT data FROM issue_records WHERE id=?").get(parent.id);
+      if (legacy) {
+        const issue = JSON.parse(String(legacy.data)) as A2AIssueRecord;
+        if (caller) requireGate(["ideation", "executor"].includes(role), "controller_required");
+        const lock = this.operationLock(issue.task_id);
+        try {
+          const result = await this.disposeIssue(
+            {
+              command: "disposition",
+              task: issue.task_id,
+              issue: issue.id,
+              action: args.action,
+              reason: args.reason,
+              basis: args.basis,
+              body: args.body,
+            },
+            caller,
+            role,
+          );
+          return {
+            ...result,
+            ...(result.delivery?.state !== "delivered" && result.delivery
+              ? { ok: false, error: "wake_undelivered" }
+              : {}),
+          };
+        } finally {
+          lock.close();
+        }
+      }
+    }
+    if (args.kind === "stop")
+      requireGate(
+        ["ideation", "user"].includes(role) && args.to === "executor",
+        "invalid_stop_sender",
+      );
+    if (args.kind === "answer")
+      requireGate(role === "ideation" && args.to === "executor", "invalid_answer_sender");
+    const entry: A2AInboxEntry = {
+      id: randomUUID(),
+      schema: 1,
+      kind: args.kind,
+      from: role,
+      to: args.to,
+      reply_to: parent?.id ?? null,
+      refs: args.refs ?? [],
+      created_at: new Date(this.now()).toISOString(),
+      body: args.body,
+      ...(args.title !== undefined ? { title: args.title } : {}),
+      ...(args.kind === "issue" ? { blocking: args.blocking ?? false } : {}),
+      ...(args.action ? { action: args.action } : {}),
+      ...(args.reason !== undefined ? { reason: args.reason } : {}),
+      ...(args.basis !== undefined ? { basis: args.basis } : {}),
+      ...(args.kind === "answer"
+        ? { certainty: "relayed", bundle_id: args.bundle_id ?? randomUUID() }
+        : {}),
+    };
+    this.appendInbox(entry);
+    const delivery = await this.deliverInbox(entry);
+    return {
+      ok: delivery.state === "delivered",
+      entry,
+      delivery,
+      ...(delivery.state !== "delivered" ? { error: "wake_undelivered" } : {}),
+    };
+  }
+  private async emergencyStop(args: A2AStopRequest, caller?: SubmitCaller): Promise<A2AGateResult> {
+    if (caller) {
+      requireGate(caller.address === "ideation", "ideation_required");
+      await caller.assertActive();
+    }
+    const stop = this.inboxEntry(args.stop_id);
+    requireGate(
+      stop.kind === "stop" && stop.to === "executor" && ["user", "ideation"].includes(stop.from),
+      "stop_entry_required",
+    );
+    const target = this.ownedThread(args.thread);
+    requireGate(
+      target && ["worker", "reviewer", "monitor"].includes(target.role),
+      "worker_target_required",
+    );
+    const taskLock = this.operationLock(target.task.task_id);
+    let entryLock: DatabaseSync | undefined;
+    try {
+      entryLock = this.operationLock(`inbox-${stop.id}`);
+      requireGate(this.now() - Date.parse(stop.created_at) > 120_000, "stop_too_early");
+      requireGate(!this.inboxConfirmed(stop.id, "executor"), "stop_already_acknowledged");
+      requireGate(
+        stop.refs.includes(`thread:${args.thread}`) ||
+          (target.attempt && stop.refs.includes(`attempt:${target.attempt.attempt_id}`)),
+        "stop_target_mismatch",
+      );
+      requireGate(this.runtime?.interruptThread, "interrupt_runtime_required");
+      const live = await this.runtime.readThread(args.thread);
+      requireGate(
+        !live.archived &&
+          !live.error &&
+          live.workspace === (target.attempt?.workspace ?? target.task.repo) &&
+          live.provider === (target.attachment?.modelSelection.provider ?? "codex"),
+        "identity_conflict",
+      );
+      if (caller) await caller.assertActive();
+      this.checkUserInputObserver();
+      await this.runtime.interruptThread(args.thread);
+      this.event(
+        target.task.task_id,
+        "emergency_interrupt_requested",
+        { stop_id: stop.id, thread: args.thread, actor: caller?.address ?? "user" },
+        target.attempt?.attempt_id ?? null,
+      );
+      return { ok: true, interruptRequested: true };
+    } finally {
+      entryLock?.close();
+      taskLock.close();
+    }
+  }
   async call(raw: unknown, caller?: SubmitCaller): Promise<A2AGateResult> {
+    const command = (raw as { command?: unknown } | null)?.command;
+    if (typeof command === "string" && (command.startsWith("inbox_") || command === "stop")) {
+      try {
+        return command === "stop"
+          ? await this.emergencyStop(Schema.decodeUnknownSync(A2AStopRequest)(raw), caller)
+          : await this.inboxCall(Schema.decodeUnknownSync(A2AInboxRequest)(raw), caller);
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Refusal ? error.code : "invalid_request",
+          details: String(error),
+        };
+      }
+    }
     const result = await this.request(raw, caller);
     const observer = this.userInputObserverStatus();
     return { ...result, ...(observer ? { user_input_observer: observer } : {}) };
@@ -1337,7 +1733,8 @@ export class A2AGates {
         };
       }
       if (caller) {
-        if (args.command !== "disposition")
+        if (caller.address === "executor") await caller.assertActive();
+        else if (args.command !== "disposition")
           requireGate(
             args.command === "submit" && this.taskForThread(caller.thread)?.task_id === taskId,
             "stale_thread",
@@ -1354,7 +1751,12 @@ export class A2AGates {
             .list()
             .find((entry) => entry.taskId === taskId)
             ?.members.find((entry) => entry.threadId === caller.thread);
-          requireGate(member?.role === "controller" && !member.endedAt, "controller_required");
+          requireGate(
+            (member?.role === "controller" && !member.endedAt) ||
+              (["ideation", "executor"].includes(caller.address ?? "") &&
+                this.ownedThread(caller.thread)?.role === "controller"),
+            "controller_required",
+          );
           await caller.assertActive();
           requireGate(this.runtime, "native_runtime_required");
           const live = await this.runtime.readThread(caller.thread);
@@ -1368,7 +1770,7 @@ export class A2AGates {
           );
           await caller.assertActive();
         }
-        return this.disposeIssue(args, caller);
+        return await this.disposeIssue(args, caller);
       }
       if (args.command === "answer_issue" || args.command === "answer_issues")
         return await this.answerIssues(args);
@@ -1438,15 +1840,23 @@ export class A2AGates {
         );
         const prompt = readFileSync(inputPath(args.instructions), "utf8");
         requireGate(prompt.trim(), "invalid_text");
+        const preset = args.preset ?? (args.role !== "controller" ? args.role : undefined);
+        if (preset)
+          requireGate(
+            args.role === (preset === "ideation" || preset === "executor" ? "controller" : preset),
+            "preset_role_mismatch",
+          );
         const attachment: A2AAttachment = {
           task_id: taskId,
           thread_id: randomUUID(),
           role: args.role,
+          ...(preset ? { preset } : {}),
           modelSelection: args.modelSelection,
           runtime_mode: args.runtimeMode,
           state: "creating",
         };
         this.saveAttachment(attachment);
+        if (preset) this.membership.bindPreset(attachment.thread_id, preset);
         await this.runtime.createAttachedThread(task, attachment, prompt);
         this.member(task, attachment.thread_id, attachment.role);
         attachment.state = "active";
@@ -1584,6 +1994,7 @@ export class A2AGates {
           this.checkUserInputObserver();
           await this.runtime!.createThread(task, attempt);
           this.member(task, attempt.thread_id, "worker");
+          this.membership.bindPreset(attempt.thread_id, "worker");
           const live = await this.runtime!.readThread(attempt.thread_id);
           this.checkThread(attempt, live);
           requireGate(!live.blocked, "run_blocked", live);
