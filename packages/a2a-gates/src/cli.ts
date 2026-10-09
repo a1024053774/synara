@@ -47,6 +47,9 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
         "Content-Type": "application/json",
       },
       body: JSON.stringify(request),
+      // run owns its submit and phase deadlines. wait_seconds is not a total
+      // runtime limit; Bun's idle timer must not discard its final receipt.
+      ...(request.command === "run" ? { timeout: false } : {}),
     });
     const result = (await response.json()) as { ok?: boolean };
     await emit(result);
