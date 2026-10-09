@@ -43,4 +43,6 @@ HTTP、工作台 CLI 与 MCP 共用门禁核心。以下请求可经现有 `a2a/
 
 `user_input_observer` 对外提供记录器状态。受管 attempt 的记录失败保持门禁 fail-closed；其他范围失败不阻断业务。启动时重放事件日志和已登记的 RPC 来源；来源无法核对的中断区间保存 `form: gap`、序号范围与原因，不推断为用户决定。消息、RPC 与重放按稳定的来源键去重；受管输入与指向 `input_id` 的 `human_intervention` 在同一事务写入。面板答复仍使用其原有登记与去重路径。
 
+人工介入事件保留输入的 `channel` 和目标 `request_id`。WS 结构化答复可以没有 message 键，但必须有 request；消息渠道的答复仍要求有效 message 身份，界面不会为结构化答复发明消息 id。
+
 旧 `human_inputs` 去重表迁入 `user_input_events`；`user_inputs` 的 task、message 可为空，历史正文和事件保留。迁移在事务中执行，允许中断后重跑；用户输入和 RPC 来源登记为追加式记录。

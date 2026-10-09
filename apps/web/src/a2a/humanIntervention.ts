@@ -25,13 +25,19 @@ export function humanInterventions(
     if (!("task" in event) || typeof event.task !== "string" || typeof details.task_id !== "string")
       throw new Error("人工介入事件缺少任务绑定");
     if (event.task !== taskId || details.task_id !== taskId) continue;
+    const structuredAnswer =
+      details.form === "answer" &&
+      details.channel === "ws-rpc" &&
+      details.message_id === null &&
+      typeof details.request_id === "string" &&
+      details.request_id.trim().length > 0;
     if (
       typeof details.event_id !== "string" ||
       !details.event_id ||
       typeof details.thread_id !== "string" ||
       !details.thread_id ||
       (details.form === undefined || details.form === "message" || details.form === "answer"
-        ? typeof details.message_id !== "string" || !details.message_id
+        ? !structuredAnswer && (typeof details.message_id !== "string" || !details.message_id)
         : details.message_id !== null &&
           (typeof details.message_id !== "string" || !details.message_id)) ||
       typeof details.attempt_id !== "string" ||

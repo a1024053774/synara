@@ -92,4 +92,55 @@ describe("human intervention protocol fixtures", () => {
     const mismatched = { ...worker, attempt: "another-attempt" };
     expect(() => humanInterventions([mismatched], "task-A")).toThrow();
   });
+  it("accepts request-bound WS answers while retaining message and attempt identity checks", () => {
+    const answer = {
+      ...worker,
+      details: {
+        ...worker.details,
+        form: "answer",
+        channel: "ws-rpc",
+        message_id: null,
+        request_id: "external-request-A",
+      },
+    };
+    expect(humanInterventions([answer, answer], "task-A")).toEqual([
+      {
+        eventId: "user-event-A",
+        threadId: "worker-A",
+        messageId: "",
+        attemptId: "old-attempt-A",
+        time: worker.time,
+        text: worker.details.text,
+      },
+    ]);
+    for (const patch of [
+      { request_id: undefined },
+      { request_id: null },
+      { request_id: "" },
+      { request_id: " " },
+      { request_id: 42 },
+      { channel: undefined },
+      { channel: "thread-message" },
+      { channel: "issue-panel" },
+      { message_id: "" },
+      { message_id: 42 },
+      { form: "message" },
+    ]) {
+      expect(() =>
+        humanInterventions([{ ...answer, details: { ...answer.details, ...patch } }], "task-A"),
+      ).toThrow();
+    }
+    expect(() =>
+      humanInterventions([{ ...answer, attempt: "foreign-attempt" }], "task-A"),
+    ).toThrow();
+    for (const channel of ["thread-message", "issue-panel", undefined]) {
+      const messageAnswer = {
+        ...answer,
+        details: { ...answer.details, channel, message_id: "external-message-A" },
+      };
+      expect(humanInterventions([messageAnswer], "task-A")[0]?.messageId).toBe(
+        "external-message-A",
+      );
+    }
+  });
 });

@@ -451,6 +451,8 @@ export class A2AGates {
             thread_id: input.target.thread,
             turn_id: input.target.turn,
             message_id: input.target.message,
+            request_id: input.target.request ?? null,
+            channel: input.channel,
             form: input.form,
             event_id: input.source_ref.event_id ?? input.source_ref.command_id,
             source_sequence: input.source_ref.source_sequence,
