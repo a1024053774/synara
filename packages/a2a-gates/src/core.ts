@@ -159,9 +159,11 @@ export class A2AGates {
           if (attempt?.reclaimed && !endedAt) {
             // Published attempt records before reclaimed_at retain their
             // completion time in the append-only event journal.
-            const completed = this.db.prepare(
-              "SELECT time FROM events WHERE task=? AND attempt=? AND type='reclaimed' ORDER BY seq DESC LIMIT 1",
-            ).get(attempt.task_id, attempt.attempt_id);
+            const completed = this.db
+              .prepare(
+                "SELECT time FROM events WHERE task=? AND attempt=? AND type='reclaimed' ORDER BY seq DESC LIMIT 1",
+              )
+              .get(attempt.task_id, attempt.attempt_id);
             requireGate(completed, "reclaim_unconfirmed");
             endedAt = String(completed.time);
           }
