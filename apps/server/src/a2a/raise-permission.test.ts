@@ -155,12 +155,14 @@ describe("a2a_raise native approval contract", () => {
 
 // T-061 failure list: digit names rejected; absent/stale identity or grant
 // accepted; unknown digit names accepted; prose or metadata precedence widened.
-describe("a2a digit names without native tool_name", () => {
+describe("gateway digit names without native tool_name", () => {
   it.each([
     ["a2a_raise", "full-access", false],
     ["a2a_submit", "full-access", false],
     ["a2a_raise", "approval-required", true],
     ["a2a_submit", "approval-required", true],
+    ["synara_e2e_review", "full-access", false],
+    ["synara_e2e_review", "approval-required", true],
   ] as const)(
     "accepts %s in %s with coordinator grant=%s once without persistence",
     async (toolName, runtimeMode, grant) => {
@@ -193,7 +195,9 @@ describe("a2a digit names without native tool_name", () => {
     "unrelated-digit-tool",
   ];
   it.each(
-    ["a2a_raise", "a2a_submit"].flatMap((tool) => conditions.map((condition) => [tool, condition])),
+    ["a2a_raise", "a2a_submit", "synara_e2e_review"].flatMap((tool) =>
+      conditions.map((condition) => [tool, condition]),
+    ),
   )("keeps %s interactive without tool_name for %s", async (toolName, condition) => {
     const f = fixture(toolName);
     Reflect.deleteProperty(f.params._meta, "tool_name");

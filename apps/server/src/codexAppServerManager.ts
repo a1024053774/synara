@@ -4987,7 +4987,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     // Current Codex builds omit tool_name from native MCP approvals. Accept
     // only their complete generated message, after checking the reserved
     // server and native approval kind above; never infer from descriptions.
-    const name = /^Allow the synara MCP server to run tool "([a-z_]+)"\?$/.exec(
+    const name = /^Allow the synara MCP server to run tool "([a-z0-9_]+)"\?$/.exec(
       this.readString(params, "message") ?? "",
     )?.[1];
     return name === undefined ? undefined : `mcp__synara__${name}`;
