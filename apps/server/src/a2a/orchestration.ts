@@ -133,15 +133,37 @@ export const installUserInputRecording = Effect.fn("a2a.installUserInputRecordin
       if (event.type === "thread.created")
         projects.set(event.payload.threadId, event.payload.projectId);
       const project = projects.get(event.aggregateId);
+      // Only non-managed failures enter the deferred queue. Its replay must
+      // retain that scope even when an unrelated managed thread emits an event.
+      const deferredReplay = yield* Effect.try({
+        try: () => gates.flushDeferredUserInputs(),
+        catch: (cause) => String(cause),
+      }).pipe(Effect.result);
+      if (deferredReplay._tag === "Failure") {
+        if (replaying) replayFailed = true;
+        yield* Effect.logError("a2a non-managed input replay failed", {
+          reason: deferredReplay.failure,
+        });
+      }
+      let inputAttempt: string | null = null;
+      let inputThread: string = event.aggregateId;
       const failure = yield* Effect.try({
         try: () => {
+          if (
+            event.type === "thread.message-sent" &&
+            event.payload.role === "user" &&
+            event.payload.dispatchOrigin === "user" &&
+            !event.commandId?.startsWith("a2a:")
+          ) {
+            inputThread = event.payload.threadId;
+            inputAttempt = gates.userInputTarget(inputThread).attempt;
+          }
           recordUserMessage(
             gates,
             event,
             project,
             event.type === "thread.message-sent" ? answers.get(event.payload.messageId) : undefined,
           );
-          gates.flushDeferredUserInputs();
           const registered = event.commandId ? gates.userInputCommand(event.commandId) : undefined;
           if (
             replaying &&
@@ -155,6 +177,8 @@ export const installUserInputRecording = Effect.fn("a2a.installUserInputRecordin
             gaps.set(event.aggregateId, { first: previous?.first ?? event, last: event.sequence });
           }
           if (registered && event.type !== "thread.message-sent") {
+            inputThread = registered.target.thread;
+            inputAttempt = registered.target.attempt;
             gates.appendUserInput(
               {
                 ...registered,
@@ -167,12 +191,11 @@ export const installUserInputRecording = Effect.fn("a2a.installUserInputRecordin
               `rpc:${event.commandId}`,
             );
           }
-          if (!replaying) gates.advanceUserInputCheckpoint(event.sequence);
         },
         catch: (cause) => ({
           event_id: event.eventId,
           source_sequence: event.sequence,
-          thread_id: event.aggregateId,
+          thread_id: inputThread,
           reason: String(cause),
         }),
       }).pipe(Effect.result);
@@ -180,10 +203,20 @@ export const installUserInputRecording = Effect.fn("a2a.installUserInputRecordin
         if (replaying) replayFailed = true;
         // Managed failures retain the existing global fail-closed latch. Other
         // failures leave business commands available; startup replays the journal.
-        if (gates.userInputTarget(event.aggregateId).attempt) {
+        if (inputAttempt) {
           gates.setUserInputObserverStatus("failed", failure.failure);
         }
         yield* Effect.logError("a2a user input recording failed", failure.failure);
+      }
+      if (!replaying && deferredReplay._tag === "Success" && failure._tag === "Success") {
+        const progress = yield* Effect.try({
+          try: () => gates.advanceUserInputCheckpoint(event.sequence),
+          catch: (cause) => String(cause),
+        }).pipe(Effect.result);
+        if (progress._tag === "Failure")
+          yield* Effect.logError("a2a user input progress unavailable", {
+            reason: progress.failure,
+          });
       }
     });
   yield* Stream.runForEach(engine.readEventsThrough(0, highWater), record);
@@ -220,7 +253,14 @@ export const installUserInputRecording = Effect.fn("a2a.installUserInputRecordin
       });
     }
   }
-  if (!replayFailed) gates.advanceUserInputCheckpoint(highWater);
+  if (!replayFailed) {
+    const progress = yield* Effect.try({
+      try: () => gates.advanceUserInputCheckpoint(highWater),
+      catch: (cause) => String(cause),
+    }).pipe(Effect.result);
+    if (progress._tag === "Failure")
+      yield* Effect.logError("a2a user input progress unavailable", { reason: progress.failure });
+  }
   replaying = false;
   // prepareQuitResume has no command event of its own. Its authoritative entry
   // receipts also recover any write interrupted after registration.
