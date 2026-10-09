@@ -1526,6 +1526,21 @@ export class A2AGates {
       !args.id && args.kind && args.to && args.body !== undefined,
       "inbox_arguments_required",
     );
+    const handoffDirections: Partial<Record<A2AInboxEntry["kind"], readonly [string, string]>> = {
+      assign: ["ideation", "executor"],
+      revise: ["ideation", "executor"],
+      cancel: ["ideation", "executor"],
+      report: ["executor", "ideation"],
+      "needs-decision": ["executor", "ideation"],
+    };
+    const direction = handoffDirections[args.kind];
+    if (direction)
+      requireGate(role === direction[0] && args.to === direction[1], "invalid_direction");
+    if (args.kind === "issue")
+      requireGate(
+        /^(?:worker|reviewer|monitor):/.test(role) && args.to === "triage",
+        "invalid_direction",
+      );
     requireGate(
       /^(?:user|ideation|executor|system|triage|(?:worker|reviewer|monitor):[A-Za-z0-9_.-]+)$/.test(
         args.to,

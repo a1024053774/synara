@@ -441,3 +441,62 @@ it("derives the user inbox from issue dispositions and preserves unknown wakes w
     f.gates.close();
   }
 });
+
+it("rejects every kind with an illegal sender or recipient before appending", async () => {
+  const root = mkdtempSync(join(tmpdir(), "t058-direction-"));
+  const gates = new A2AGates(root);
+  const sql = new DatabaseSync(join(root, "state.sqlite3"));
+  try {
+    const issue = await gates.call({
+      command: "inbox_send",
+      from: "worker:w1",
+      to: "triage",
+      kind: "issue",
+      title: "direction fixture",
+      body: "issue",
+    });
+    const assign = await gates.call({
+      command: "inbox_send",
+      from: "ideation",
+      to: "executor",
+      kind: "assign",
+      body: "assign",
+    });
+    const cases = [
+      { kind: "assign", from: "executor", to: "executor" },
+      { kind: "revise", from: "executor", to: "executor" },
+      { kind: "cancel", from: "ideation", to: "ideation" },
+      { kind: "report", from: "ideation", to: "ideation" },
+      { kind: "needs-decision", from: "executor", to: "executor" },
+      { kind: "stop", from: "executor", to: "executor" },
+      { kind: "issue", from: "ideation", to: "triage", title: "invalid issue sender" },
+      { kind: "answer", from: "executor", to: "executor" },
+      {
+        kind: "disposition",
+        from: "worker:w1",
+        to: "triage",
+        reply_to: issue.entry!.id,
+        action: "needs-user",
+      },
+      { kind: "ack", from: "ideation", to: "ideation", reply_to: assign.entry!.id },
+    ];
+    for (const input of cases) {
+      const before = sql.prepare("SELECT id,data FROM inbox_records ORDER BY rowid").all();
+      const response = await gates.call({
+        command: "inbox_send",
+        body: "illegal direction sentinel",
+        refs: [],
+        ...input,
+      });
+      assert.equal(response.ok, false, input.kind);
+      assert.equal(response.entry, undefined, input.kind + " must reject before append");
+      assert.deepEqual(
+        sql.prepare("SELECT id,data FROM inbox_records ORDER BY rowid").all(),
+        before,
+      );
+    }
+  } finally {
+    sql.close();
+    gates.close();
+  }
+});
