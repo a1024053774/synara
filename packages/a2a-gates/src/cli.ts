@@ -16,6 +16,8 @@ const commands: Record<string, { required: string[]; optional?: string[] }> = {
   integrate: { required: [], optional: ["attempt"] },
   status: { required: [] },
   events: { required: [] },
+  issues: { required: [], optional: ["thread"] },
+  answer_issue: { required: ["issue", "answer"] },
   reclaim: { required: [], optional: ["attempt", "thread"] },
 };
 
@@ -79,6 +81,8 @@ export async function main(argv = process.argv.slice(2), runtime?: GateRuntime) 
       "fence",
       "spec-rev",
       "commit",
+      "issue",
+      "answer",
     ];
     const { values, positionals } = parseArgs({
       args: argv,

@@ -17,6 +17,8 @@ export const A2AGateRequest = Schema.Struct({
     "reclaim",
     "status",
     "events",
+    "issues",
+    "answer_issue",
   ]),
   task: Schema.String,
   repo: Schema.optional(Schema.String),
@@ -37,6 +39,8 @@ export const A2AGateRequest = Schema.Struct({
   commit: Schema.optional(Schema.String),
   wait_seconds: Schema.optional(Schema.Number),
   runtimeMode: Schema.optional(Schema.Literals(["approval-required", "full-access"])),
+  issue: Schema.optional(Schema.String),
+  answer: Schema.optional(Schema.String),
 });
 export type A2AGateRequest = typeof A2AGateRequest.Type;
 
@@ -164,4 +168,52 @@ export interface A2AGateResult {
   error?: string;
   details?: unknown;
   events?: ReadonlyArray<{ seq: number; time: string; type: string; details: unknown }>;
+  records?: ReadonlyArray<A2AIssueRecord>;
+  issues?: ReadonlyArray<A2AIssueView>;
+  user_inputs?: ReadonlyArray<A2AUserInput>;
+}
+
+export interface A2AIssueRecord {
+  id: string;
+  schema: 1;
+  kind: "issue" | "answer" | "disposition";
+  from: string;
+  to: string;
+  reply_to: string | null;
+  refs: ReadonlyArray<string>;
+  created_at: string;
+  body: string;
+  task_id: string;
+  attempt_id: string;
+  thread_id: string;
+  turn_id: string;
+  number: number;
+  title: string;
+  blocking: boolean;
+  issue_id: string;
+  input_id?: string;
+  message_id?: string;
+  bundle_id?: string;
+  action?: "delivered" | "forward";
+}
+
+export interface A2AIssueView {
+  issue: A2AIssueRecord;
+  state: "待判断" | "等你决定" | "已答复" | "已送达" | "已转交";
+  answer?: A2AIssueRecord;
+}
+
+export interface A2AUserInput {
+  id: string;
+  schema: 1;
+  form: "message" | "answer";
+  text: string;
+  target: { task: string; attempt: string; thread: string; turn: string | null; message: string };
+  channel: "thread-message" | "issue-panel";
+  reply_to: string | null;
+  source_ref: { message_id: string; event_id?: string; source_sequence?: number };
+  certainty: "observed";
+  created_at: string;
+  bundle_id?: string;
+  question?: { number: number; title: string; body: string };
 }

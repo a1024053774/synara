@@ -56,6 +56,16 @@ const route = Effect.gen(function* () {
       },
     });
   if (url.pathname === "/api/a2a/membership") return yield* membershipRoute(request, headers);
+  if (url.pathname === "/api/a2a/issues" && request.method === "GET") {
+    const result = yield* Effect.promise(() =>
+      gates.call({
+        command: "issues",
+        task: url.searchParams.get("task") ?? "",
+        ...(url.searchParams.has("thread") ? { thread: url.searchParams.get("thread") } : {}),
+      }),
+    );
+    return HttpServerResponse.jsonUnsafe(result, { headers });
+  }
   if (request.method === "GET") {
     const task = gates.taskForThread(url.searchParams.get("thread") ?? "");
     return HttpServerResponse.jsonUnsafe(
@@ -86,4 +96,6 @@ export const a2aGateRouteLayer = Layer.mergeAll(
   HttpRouter.add("GET", "/api/a2a/membership", route),
   HttpRouter.add("POST", "/api/a2a/membership", route),
   HttpRouter.add("OPTIONS", "/api/a2a/membership", route),
+  HttpRouter.add("GET", "/api/a2a/issues", route),
+  HttpRouter.add("OPTIONS", "/api/a2a/issues", route),
 );

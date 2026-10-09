@@ -19,6 +19,7 @@ import { MembershipEditor } from "./MembershipEditor";
 import { requestA2A } from "./api";
 import { useGateTask } from "./useGateTask";
 import { InterventionMarks } from "./InterventionMarks";
+import { IssuePanel } from "./IssuePanel";
 import type { Project } from "../types";
 
 const selectThreadShells = createThreadShellsSelector();
@@ -344,6 +345,7 @@ export function TaskWindow() {
                             </Link>
                           )}
                         </header>
+                        <IssuePanel task={task.taskId} thread={member.threadId} />
                         {thread && thread.projectId === task.projectId ? (
                           <ChatView
                             threadId={member.threadId}

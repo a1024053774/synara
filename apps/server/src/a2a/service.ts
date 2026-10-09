@@ -205,6 +205,33 @@ export const A2AGateServiceLive = Layer.effect(
           shell.worktreePath ?? (Option.isSome(project) ? project.value.workspaceRoot : ""),
         );
       },
+      sendUserAnswer: async (thread, messageId, text) => {
+        const value = await Effect.runPromise(
+          query.getThreadShellById(ThreadId.makeUnsafe(thread)),
+        );
+        if (Option.isNone(value) || value.value.archivedAt !== null)
+          throw new Refusal("session_ended");
+        const shell = value.value;
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.makeUnsafe(`a2a:answer:${messageId}`),
+            threadId: shell.id,
+            message: {
+              messageId: MessageId.makeUnsafe(messageId),
+              role: "user",
+              text,
+              attachments: [],
+            },
+            modelSelection: shell.modelSelection,
+            runtimeMode: shell.runtimeMode,
+            interactionMode: shell.interactionMode,
+            dispatchOrigin: "user",
+            dispatchMode: "queue",
+            createdAt: new Date().toISOString(),
+          }),
+        );
+      },
       stopThread: async (thread) => {
         await Effect.runPromise(providers.stopSession({ threadId: ThreadId.makeUnsafe(thread) }));
         await Effect.runPromise(

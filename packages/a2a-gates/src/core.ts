@@ -13,6 +13,9 @@ import {
   type A2ATask,
   type A2AAttachment,
   type A2ATaskMembership,
+  type A2AIssueRecord,
+  type A2AIssueView,
+  type A2AUserInput,
   ProjectId,
   ThreadId,
 } from "@synara/contracts";
@@ -68,6 +71,7 @@ export interface GateRuntime {
   stopThread(thread: string): Promise<void>;
   archiveThread(thread: string): Promise<void>;
   createAttachedThread?(task: A2ATask, attachment: A2AAttachment, prompt: string): Promise<void>;
+  sendUserAnswer?(thread: string, messageId: string, message: string): Promise<void>;
 }
 export interface SubmitCaller {
   thread: string;
@@ -95,6 +99,12 @@ export class A2AGates {
       CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, task TEXT NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS human_inputs (event_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS issue_records (id TEXT PRIMARY KEY, task TEXT NOT NULL, thread TEXT NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS user_inputs (id TEXT PRIMARY KEY, task TEXT NOT NULL, message TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS issue_records_no_update BEFORE UPDATE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
+      CREATE TRIGGER IF NOT EXISTS issue_records_no_delete BEFORE DELETE ON issue_records BEGIN SELECT RAISE(ABORT,'append only'); END;
+      CREATE TRIGGER IF NOT EXISTS user_inputs_no_update BEFORE UPDATE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;
+      CREATE TRIGGER IF NOT EXISTS user_inputs_no_delete BEFORE DELETE ON user_inputs BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, task TEXT NOT NULL, attempt TEXT, type TEXT NOT NULL, details TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;`);
@@ -262,6 +272,10 @@ export class A2AGates {
       .get(input.thread_id);
     if (!input.thread_id || !row) return false;
     const attempt = JSON.parse(String(row.data)) as A2AAttempt;
+    // The issue-panel RPC registers its message before dispatch. Replay must
+    // not turn that answer into another input or intervention.
+    if (this.db.prepare("SELECT 1 FROM user_inputs WHERE message=?").get(input.message_id))
+      return false;
     requireGate(
       input.event_id && input.message_id && input.dispatch_origin === "user",
       "invalid_human_input",
@@ -272,11 +286,35 @@ export class A2AGates {
         .prepare("INSERT OR IGNORE INTO human_inputs(event_id) VALUES (?)")
         .run(input.event_id);
       if (!inserted.changes) return false;
+      const inputId = randomUUID();
+      this.saveUserInput({
+        id: inputId,
+        schema: 1,
+        form: "message",
+        text: input.text,
+        target: {
+          task: attempt.task_id,
+          attempt: attempt.attempt_id,
+          thread: input.thread_id,
+          turn: input.turn_id,
+          message: input.message_id,
+        },
+        channel: "thread-message",
+        reply_to: null,
+        source_ref: {
+          message_id: input.message_id,
+          event_id: input.event_id,
+          source_sequence: input.source_sequence,
+        },
+        certainty: "observed",
+        created_at: input.created_at,
+      });
       this.event(
         attempt.task_id,
         "human_intervention",
         {
           ...input,
+          input_id: inputId,
           task_id: attempt.task_id,
           attempt_id: attempt.attempt_id,
           session_id: attempt.session_id,
@@ -290,6 +328,243 @@ export class A2AGates {
     } finally {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
+  }
+  private saveUserInput(input: A2AUserInput) {
+    this.db
+      .prepare("INSERT INTO user_inputs(id,task,message,data) VALUES (?,?,?,?)")
+      .run(input.id, input.target.task, input.target.message, JSON.stringify(input));
+  }
+  private appendIssue(record: A2AIssueRecord) {
+    const ownsTransaction = !this.db.isTransaction;
+    if (ownsTransaction) this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare("INSERT INTO issue_records(id,task,thread,data) VALUES (?,?,?,?)")
+        .run(record.id, record.task_id, record.thread_id, JSON.stringify(record));
+      this.event(
+        record.task_id,
+        `issue_${record.kind === "disposition" ? record.action : record.kind}`,
+        record,
+        record.attempt_id,
+      );
+      if (ownsTransaction) this.db.exec("COMMIT");
+    } finally {
+      if (ownsTransaction && this.db.isTransaction) this.db.exec("ROLLBACK");
+    }
+  }
+  private readIssues(task: string, thread?: string) {
+    const records = this.db
+      .prepare("SELECT data FROM issue_records WHERE task=? ORDER BY rowid")
+      .all(task)
+      .map((row) => JSON.parse(String(row.data)) as A2AIssueRecord)
+      .filter((record) => thread === undefined || record.thread_id === thread);
+    const issues: A2AIssueView[] = records
+      .filter((record) => record.kind === "issue")
+      .map((issue) => {
+        const chain = records.filter((record) => record.issue_id === issue.id);
+        const answer = chain.find((record) => record.kind === "answer");
+        const last = chain.at(-1)!;
+        const state =
+          last.action === "delivered"
+            ? "已送达"
+            : last.action === "forward"
+              ? "已转交"
+              : answer
+                ? "已答复"
+                : issue.blocking || Date.now() - Date.parse(issue.created_at) >= 900_000
+                  ? "等你决定"
+                  : "待判断";
+        return { issue, state, ...(answer ? { answer } : {}) };
+      });
+    const user_inputs = this.db
+      .prepare("SELECT data FROM user_inputs WHERE task=? ORDER BY rowid")
+      .all(task)
+      .map((row) => JSON.parse(String(row.data)) as A2AUserInput)
+      .filter((input) => thread === undefined || input.target.thread === thread);
+    return { records, issues, user_inputs };
+  }
+  /** MCP credentials own identity; arguments cannot select another thread. */
+  async raiseIssue(
+    input: { title: string; body: string; blocking: boolean; refs: ReadonlyArray<string> },
+    caller: SubmitCaller,
+  ) {
+    const task = this.taskForThread(caller.thread);
+    requireGate(task, "stale_thread");
+    const lock = this.operationLock(task.task_id);
+    try {
+      this.checkHumanInputObserver();
+      const current = this.load(task.task_id);
+      const attempt = current.current_attempt;
+      requireGate(
+        attempt && attempt.thread_id === caller.thread && !attempt.reclaimed,
+        "stale_thread",
+      );
+      requireGate(input.title.trim().length > 0, "invalid_title");
+      await caller.assertActive();
+      requireGate(this.runtime, "native_runtime_required");
+      const live = await this.runtime.readThread(caller.thread);
+      requireGate(
+        !live.error &&
+          live.workspace === attempt.workspace &&
+          live.provider === "codex" &&
+          live.running &&
+          !live.blocked &&
+          live.turn === caller.turn,
+        "identity_conflict",
+      );
+      await caller.assertActive();
+      const issueId = randomUUID();
+      const number =
+        Number(
+          this.db
+            .prepare(
+              "SELECT count(*) AS count FROM issue_records WHERE thread=? AND json_extract(data,'$.kind')='issue'",
+            )
+            .get(caller.thread)!.count,
+        ) + 1;
+      const issue: A2AIssueRecord = {
+        id: issueId,
+        schema: 1,
+        kind: "issue",
+        from: `worker:${caller.thread}`,
+        to: "triage",
+        reply_to: null,
+        refs: [
+          `task:${task.task_id}`,
+          `attempt:${attempt.attempt_id}`,
+          `thread:${caller.thread}`,
+          `turn:${caller.turn}`,
+          ...input.refs,
+        ],
+        created_at: new Date().toISOString(),
+        body: input.body,
+        task_id: task.task_id,
+        attempt_id: attempt.attempt_id,
+        thread_id: caller.thread,
+        turn_id: caller.turn,
+        number,
+        title: input.title,
+        blocking: input.blocking,
+        issue_id: issueId,
+      };
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        this.appendIssue(issue);
+        this.db.exec("COMMIT");
+      } finally {
+        if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      }
+      return { ok: true, id: issueId, number };
+    } finally {
+      lock.close();
+    }
+  }
+  private async answerIssue(args: A2AGateRequest): Promise<A2AGateResult> {
+    const issue = this.readIssues(args.task).issues.find(
+      (view) => view.issue.id === args.issue,
+    )?.issue;
+    requireGate(issue, "unknown_issue");
+    requireGate(typeof args.answer === "string" && args.answer.trim().length > 0, "invalid_answer");
+    requireGate(
+      !this.readIssues(args.task).records.some(
+        (record) => record.issue_id === issue.id && record.kind === "answer",
+      ),
+      "issue_answered",
+    );
+    requireGate(this.runtime?.sendUserAnswer, "native_runtime_required");
+    const answer = args.answer.trimEnd();
+    const bodyChars = Array.from(issue.body);
+    const body = bodyChars.length > 600 ? bodyChars.slice(0, 599).join("") + "…" : issue.body;
+    const message = `问题 ${issue.number}：${issue.title}\n${body ? body + "\n" : ""}用户答复：${answer}`;
+    const inputId = randomUUID(),
+      messageId = randomUUID(),
+      bundleId = randomUUID();
+    const createdAt = new Date().toISOString();
+    const input: A2AUserInput = {
+      id: inputId,
+      schema: 1,
+      form: "answer",
+      text: answer,
+      target: {
+        task: issue.task_id,
+        attempt: issue.attempt_id,
+        thread: issue.thread_id,
+        turn: null,
+        message: messageId,
+      },
+      channel: "issue-panel",
+      reply_to: issue.id,
+      source_ref: { message_id: messageId },
+      certainty: "observed",
+      created_at: createdAt,
+      bundle_id: bundleId,
+      question: { number: issue.number, title: issue.title, body: issue.body },
+    };
+    const record: A2AIssueRecord = {
+      ...issue,
+      id: inputId,
+      kind: "answer",
+      from: "user",
+      to: issue.from,
+      reply_to: issue.id,
+      created_at: createdAt,
+      body: answer,
+      input_id: inputId,
+      message_id: messageId,
+      bundle_id: bundleId,
+      refs: [...issue.refs, `issue:${issue.id}`, `input:${inputId}`, `message:${messageId}`],
+    };
+    // Input, answer, message registration and derived intervention are atomic.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.saveUserInput(input);
+      this.appendIssue(record);
+      this.event(
+        issue.task_id,
+        "human_intervention",
+        {
+          input_id: inputId,
+          event_id: inputId,
+          task_id: issue.task_id,
+          attempt_id: issue.attempt_id,
+          thread_id: issue.thread_id,
+          message_id: messageId,
+          dispatch_origin: "user",
+          text: message,
+        },
+        issue.attempt_id,
+      );
+      this.db.exec("COMMIT");
+    } finally {
+      if (this.db.isTransaction) this.db.exec("ROLLBACK");
+    }
+    const current = this.load(args.task).current_attempt;
+    if (!current || current.attempt_id !== issue.attempt_id || current.reclaimed) {
+      this.appendIssue({
+        ...record,
+        id: randomUUID(),
+        kind: "disposition",
+        from: "system",
+        to: "executor",
+        reply_to: record.id,
+        body: "session-ended",
+        action: "forward",
+        created_at: new Date().toISOString(),
+      });
+      return { ok: true, ...this.readIssues(args.task) };
+    }
+    await this.runtime.sendUserAnswer(issue.thread_id, messageId, message);
+    this.appendIssue({
+      ...record,
+      id: randomUUID(),
+      kind: "disposition",
+      from: "system",
+      reply_to: record.id,
+      body: "",
+      action: "delivered",
+      created_at: new Date().toISOString(),
+    });
+    return { ok: true, ...this.readIssues(args.task) };
   }
   private event(task: string, type: string, details: unknown, expectedAttempt?: string | null) {
     this.checkHumanInputObserver();
@@ -736,7 +1011,12 @@ export class A2AGates {
       taskId = id(args.task);
       if (args.attempt !== undefined) id(args.attempt);
       if (args.session !== undefined) id(args.session);
-      if (args.command === "status") return { ok: true, task: this.load(taskId) };
+      if (args.command === "status")
+        return { ok: true, task: this.load(taskId), ...this.readIssues(taskId) };
+      if (args.command === "issues") {
+        this.load(taskId);
+        return { ok: true, ...this.readIssues(taskId, args.thread) };
+      }
       if (args.command === "events") {
         const rows = this.db
           .prepare(
@@ -765,6 +1045,7 @@ export class A2AGates {
       // A separate SQLite write transaction is the OS-released task operation lock.
       // Keep the inode, never unlink it. Main-state reads remain available during an oracle.
       lock = this.operationLock(taskId);
+      if (args.command === "answer_issue") return await this.answerIssue(args);
       if (args.command === "create") {
         requireGate(!this.db.prepare("SELECT 1 FROM tasks WHERE id=?").get(taskId), "task_exists");
         const repo = inputPath(args.repo, true),
