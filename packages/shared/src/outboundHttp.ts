@@ -54,6 +54,8 @@ export interface OutboundHttpPolicy {
   readonly requirePublicAddress?: boolean;
   /** Permits HTTP only for localhost, 127.0.0.1, or ::1. */
   readonly allowLoopbackHttp?: boolean;
+  /** Enables the fixed provider-usage hosts' proxy fake-IP exception only. */
+  readonly allowProviderUsageProxyFakeIp?: boolean;
 }
 
 export interface OutboundHttpRequest {
@@ -262,10 +264,19 @@ function requestHeaders(headers: Headers): Record<string, string> {
   return result;
 }
 
+const providerUsageProxyOrigins = new Set([
+  "https://chatgpt.com",
+  "https://api.anthropic.com",
+  "https://api2.cursor.sh",
+]);
+const proxyFakeIpAddresses = new Net.BlockList();
+proxyFakeIpAddresses.addSubnet("198.18.0.0", 15, "ipv4");
+
 async function resolvePinnedAddress(
   url: URL,
   requirePublicAddress: boolean,
   allowLoopbackHttp: boolean,
+  allowProviderUsageProxyFakeIp: boolean,
   signal: AbortSignal,
 ): Promise<{ readonly address: string; readonly family: 4 | 6 }> {
   if (signal.aborted) throw abortedError(signal.reason);
@@ -276,7 +287,20 @@ async function resolvePinnedAddress(
   const requireLoopbackAddress = allowLoopbackHttp && url.protocol === "http:";
   const assertAddressAllowed = (address: string) => {
     if (requireLoopbackAddress) assertExactLoopbackIpAddress(address);
-    else if (requirePublicAddress) assertPublicIpAddress(address);
+    else if (requirePublicAddress) {
+      // DNS proxy fake-IP mode maps these fixed usage origins into 198.18.0.0/15.
+      // Keep all other destinations/address ranges under the normal SSRF policy.
+      // Remove this exception when usage transport supports fake-IP proxies without it.
+      if (
+        allowProviderUsageProxyFakeIp &&
+        providerUsageProxyOrigins.has(url.origin) &&
+        Net.isIP(address) === 4 &&
+        proxyFakeIpAddresses.check(address, "ipv4")
+      ) {
+        return;
+      }
+      assertPublicIpAddress(address);
+    }
   };
   const literalFamily = Net.isIP(hostname);
   if (literalFamily === 4 || literalFamily === 6) {
@@ -344,12 +368,14 @@ async function requestHop(input: {
   readonly maxResponseBytes: number;
   readonly requirePublicAddress: boolean;
   readonly allowLoopbackHttp: boolean;
+  readonly allowProviderUsageProxyFakeIp: boolean;
   readonly signal: AbortSignal;
 }): Promise<OutboundHttpResponse> {
   const pinned = await resolvePinnedAddress(
     input.url,
     input.requirePublicAddress,
     input.allowLoopbackHttp,
+    input.allowProviderUsageProxyFakeIp,
     input.signal,
   );
 
@@ -513,6 +539,7 @@ export class OutboundHttpClient {
           maxResponseBytes: policy.maxResponseBytes,
           requirePublicAddress: policy.requirePublicAddress ?? true,
           allowLoopbackHttp,
+          allowProviderUsageProxyFakeIp: policy.allowProviderUsageProxyFakeIp === true,
           signal: controller.signal,
         });
         if (!isRedirectStatus(response.status)) return response;
