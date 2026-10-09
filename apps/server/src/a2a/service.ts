@@ -247,6 +247,14 @@ export const A2AGateServiceLive = Layer.effect(
         await bounded(thread, providerCommands.drain.pipe(Effect.andThen(settleProjection)));
       },
       archiveThread: async (thread) => {
+        const existing = await Effect.runPromise(
+          query.getThreadShellById(ThreadId.makeUnsafe(thread)),
+        );
+        if (Option.isNone(existing))
+          throw new Refusal("run_external_unknown", "thread_identity_unknown");
+        // Native archive rejects a second command. Reclaim still owns stop and
+        // identity checks, then reads this durable archive fact back itself.
+        if (existing.value.archivedAt !== null) return;
         await Effect.runPromise(
           engine.dispatch({
             type: "thread.archive",
