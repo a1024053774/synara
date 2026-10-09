@@ -130,9 +130,8 @@ describe("human intervention protocol fixtures", () => {
         humanInterventions([{ ...answer, details: { ...answer.details, ...patch } }], "task-A"),
       ).toThrow();
     }
-    expect(() =>
-      humanInterventions([{ ...answer, attempt: "foreign-attempt" }], "task-A"),
-    ).toThrow();
+    const mismatchedAnswer = { ...answer, attempt: "foreign-attempt" };
+    expect(() => humanInterventions([mismatchedAnswer], "task-A")).toThrow();
     for (const channel of ["thread-message", "issue-panel", undefined]) {
       const messageAnswer = {
         ...answer,
