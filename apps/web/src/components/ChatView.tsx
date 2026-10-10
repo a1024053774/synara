@@ -6453,27 +6453,24 @@ export default function ChatView({
             {shouldRenderChatPaneContent && isCenteredEmptyLanding ? (
               <div
                 className={cn(
-                  "chat-pane-enter flex min-h-0 flex-1 flex-col",
+                  "chat-pane-enter flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain",
                   CHAT_COLUMN_GUTTER_CLASS_NAME,
                 )}
               >
-                {/* The heading floats centered in the space above the composer, which is
-                    anchored to the bottom of the pane (with its workspace-tools rail
-                    stacked on top of the input) so starting a chat keeps the composer
-                    where it lives for the rest of the conversation. */}
-                <div className="relative flex min-h-0 flex-1 items-center justify-center">
-                  {/* Pinned to the top so the heading stays optically centered; hidden on
-                      short panes where it would crowd the heading. */}
-                  <div className="absolute inset-x-0 top-4 flex justify-center px-6 [@media(max-height:620px)]:hidden">
+                {/* A task panel can leave much less room than the window height suggests.
+                    Keep the promo, hero and composer in flow and scroll the landing when
+                    they no longer fit. With room to spare, the composer stays at the bottom. */}
+                <div className="flex flex-1 shrink-0 flex-col">
+                  <div className="flex shrink-0 justify-center px-6 pt-4">
                     <ProjectImportLandingBanner className="w-full max-w-[520px]" />
                   </div>
                   <div
                     className={cn(
-                      "flex flex-col items-center gap-4 px-6 text-center select-none",
+                      "flex grow shrink-0 flex-col items-center justify-center gap-4 px-6 py-6 text-center select-none",
                       CHAT_COLUMN_FRAME_CLASS_NAME,
                     )}
                   >
-                    <SynaraLogo aria-label="Synara logo" className="size-10" />
+                    <SynaraLogo aria-label="Synara logo" className="size-10 shrink-0" />
                     <h2
                       data-testid="empty-landing-heading"
                       className="text-[26px] font-normal leading-[1.15] tracking-[-0.015em] text-foreground/95 sm:text-[30px]"
