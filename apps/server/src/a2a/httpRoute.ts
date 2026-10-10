@@ -9,6 +9,7 @@ import { shouldRejectUntrustedRequestOrigin, normalizeCorsOrigin } from "../trus
 import { authenticateRpcWebSocketUpgrade } from "../wsRpc";
 import { readMcpJsonBody } from "../agentGateway/httpRoute";
 import { membershipRoute } from "./membershipRoute";
+import { rolePermissionsRoute } from "./rolePermissionsRoute";
 
 const route = Effect.gen(function* () {
   const request = yield* HttpServerRequest.HttpServerRequest;
@@ -56,6 +57,8 @@ const route = Effect.gen(function* () {
       },
     });
   if (url.pathname === "/api/a2a/membership") return yield* membershipRoute(request, headers);
+  if (url.pathname === "/api/a2a/role-permissions")
+    return yield* rolePermissionsRoute(request, headers);
   if (url.pathname === "/api/a2a/issues" && request.method === "GET") {
     const result = yield* Effect.promise(() =>
       gates.call({
@@ -90,6 +93,9 @@ const route = Effect.gen(function* () {
 );
 
 export const a2aGateRouteLayer = Layer.mergeAll(
+  HttpRouter.add("GET", "/api/a2a/role-permissions", route),
+  HttpRouter.add("POST", "/api/a2a/role-permissions", route),
+  HttpRouter.add("OPTIONS", "/api/a2a/role-permissions", route),
   HttpRouter.add("POST", "/api/a2a", route),
   HttpRouter.add("GET", "/api/a2a", route),
   HttpRouter.add("OPTIONS", "/api/a2a", route),

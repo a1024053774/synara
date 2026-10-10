@@ -1,11 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { A2AMembership } from "@synara/a2a-gates/membership";
-import type { A2ASessionPreset } from "@synara/contracts";
+import type { A2ASessionPreset, A2ARolePermissionView } from "@synara/contracts";
 
 import { Effect, Layer } from "effect";
 import { ServerConfig } from "../../config";
-import { a2aCapabilities } from "../../a2a/capabilities";
+import {
+  a2aCapabilities,
+  ensureRolePermissionTables,
+  readRolePermission,
+  RolePermissionRefusal,
+} from "@synara/a2a-gates/rolePermissions";
 
 import {
   AgentGatewaySessionRegistry,
@@ -28,6 +34,7 @@ export function makeAgentGatewaySessionRegistry(options?: {
   readonly now?: () => number;
   readonly randomId?: () => string;
   readonly a2aPresetForThread?: (thread: string) => A2ASessionPreset | undefined;
+  readonly a2aPermissionForRole?: (role: A2ASessionPreset) => A2ARolePermissionView;
 }): AgentGatewaySessionRegistryShape {
   const now = options?.now ?? Date.now;
   const randomId = options?.randomId ?? randomUUID;
@@ -81,18 +88,34 @@ export function makeAgentGatewaySessionRegistry(options?: {
       const sessionKey = `gateway-session:${randomId()}`;
       const token = `sagw_session_${randomId()}`;
       const preset = options?.a2aPresetForThread?.(threadId);
+      const permission = preset ? options?.a2aPermissionForRole?.(preset) : undefined;
+      if (permission?.error || permission?.effective === null)
+        throw new RolePermissionRefusal("invalid_saved_permissions");
       const identity: AgentGatewaySessionIdentity = {
         sessionKey,
         threadId,
         provider,
         issuedAt,
         capabilities: new Set<AgentGatewayCapability>([
-          ...(preset ? a2aCapabilities[preset] : PROVIDER_SESSION_CAPABILITIES),
+          ...(preset
+            ? (permission?.effective?.capabilities ?? a2aCapabilities[preset])
+            : PROVIDER_SESSION_CAPABILITIES),
           ...(!preset ? (issueOptions?.additionalCapabilities ?? []) : []).filter(
             (capability) =>
               capability !== "computer:control" || !disabledComputerThreads.has(threadId),
           ),
         ]),
+        ...(preset
+          ? {
+              a2aPermissions: {
+                role: preset,
+                autoApproveTools:
+                  permission?.effective?.autoApproveTools === null || permission === undefined
+                    ? null
+                    : [...permission.effective!.autoApproveTools!],
+              },
+            }
+          : {}),
       };
       const registered: RegisteredSession = {
         identity,
@@ -153,9 +176,14 @@ export const AgentGatewaySessionRegistryLive = Layer.effect(
   Effect.gen(function* () {
     const config = yield* ServerConfig;
     const bindings = new A2AMembership(join(config.stateDir, "a2a-gates"));
+    const permissions = new DatabaseSync(join(config.stateDir, "a2a-gates/state.sqlite3"));
+    permissions.exec("PRAGMA busy_timeout=5000");
+    ensureRolePermissionTables(permissions);
     yield* Effect.addFinalizer(() => Effect.sync(() => bindings.close()));
+    yield* Effect.addFinalizer(() => Effect.sync(() => permissions.close()));
     return makeAgentGatewaySessionRegistry({
       a2aPresetForThread: (thread) => bindings.presetForThread(thread),
+      a2aPermissionForRole: (role) => readRolePermission(permissions, role),
     });
   }),
 );

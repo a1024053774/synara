@@ -169,10 +169,22 @@ export const makeAgentGatewayCredentials = Effect.gen(function* () {
     cancelSessionTurnRequests,
     retireSessionTurn,
     revokeSessionToken,
-    connectionForThread: (threadId, provider, options) => ({
-      url: endpoint.url,
-      bearerToken: issueSessionToken(threadId, provider, options),
-    }),
+    connectionForThread: (threadId, provider, options) => {
+      const bearerToken = issueSessionToken(threadId, provider, options);
+      return {
+        url: endpoint.url,
+        bearerToken,
+        a2aPermissions: (turnId) => {
+          const identity = sessionRegistry.verify(bearerToken);
+          if (
+            !identity ||
+            (turnId !== undefined && !sessionRegistry.bindWriteAuthority(bearerToken, turnId))
+          )
+            return null;
+          return identity.a2aPermissions;
+        },
+      };
+    },
     stdioProxy: {
       command: process.execPath,
       args: [stdioProxyScriptPath],

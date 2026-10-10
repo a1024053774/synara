@@ -55,3 +55,4 @@ export * from "./todo";
 export * from "./a2aGates";
 export * from "./a2aMembership";
 export * from "./a2aInbox";
+export * from "./a2aRolePermissions";

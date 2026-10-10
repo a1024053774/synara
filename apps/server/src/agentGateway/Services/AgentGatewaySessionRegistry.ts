@@ -1,4 +1,4 @@
-import type { ProviderKind, ThreadId } from "@synara/contracts";
+import type { A2ASessionPreset, ProviderKind, ThreadId } from "@synara/contracts";
 import { ServiceMap } from "effect";
 
 export type AgentGatewayCapability =
@@ -22,6 +22,10 @@ export interface AgentGatewaySessionIdentity {
   readonly provider: ProviderKind;
   readonly issuedAt: number;
   readonly capabilities: ReadonlySet<AgentGatewayCapability>;
+  readonly a2aPermissions?: {
+    readonly role: A2ASessionPreset;
+    readonly autoApproveTools: readonly string[] | null;
+  };
 }
 
 export interface AgentGatewayIssuedSession extends AgentGatewaySessionIdentity {

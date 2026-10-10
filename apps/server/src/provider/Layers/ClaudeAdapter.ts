@@ -19,6 +19,7 @@ import type {
   Options as ClaudeQueryOptions,
   ModelInfo,
   PermissionMode,
+  Query,
   PermissionResult,
   PermissionUpdate,
   SDKAssistantMessageError,
@@ -118,6 +119,7 @@ import {
   shouldAllowSynaraComputerProviderTool,
 } from "../../agentGateway/computerToolPermission.ts";
 import { AgentGatewayCredentials } from "../../agentGateway/Services/AgentGatewayCredentials.ts";
+import { a2aProviderPermission } from "../../a2a/providerPermission";
 import { PROVIDER_ADAPTER_RUNTIME_EVENT_BUFFER_CAPACITY } from "../Services/ProviderAdapter.ts";
 import {
   acquireAgentGatewaySessionLease,
@@ -5916,6 +5918,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               const interactionTurnId =
                 context.turnState?.turnId ??
                 (callbackOptions.agentID !== undefined ? context.lastTurnId : undefined);
+              const a2aDecision = a2aProviderPermission({
+                name: toolName,
+                permissions:
+                  context.gatewaySessionLease?.connection.a2aPermissions?.(interactionTurnId),
+                activeTurn: context.turnState !== undefined && interactionTurnId !== undefined,
+                interactionMode: context.turnState?.interactionMode,
+              });
+              if (a2aDecision === "allow")
+                return { behavior: "allow", updatedInput: toolInput } satisfies PermissionResult;
               if (
                 shouldAllowSynaraComputerProviderTool({
                   computerControlEnabled:
@@ -5938,6 +5949,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               // scopes and authorizes them server-side. File edits, shell, and
               // every non-Synara tool keep the ordinary permission path.
               if (
+                a2aDecision !== "prompt" &&
                 input.autoApproveSynaraTools === true &&
                 context.gatewaySessionLease !== undefined &&
                 isSynaraGatewayToolName(toolName)
@@ -5947,7 +5959,10 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                   updatedInput: toolInput,
                 } satisfies PermissionResult;
               }
-              if (runtimeMode === "full-access" || context.approvalsAlwaysAllowedForSession) {
+              if (
+                a2aDecision !== "prompt" &&
+                (runtimeMode === "full-access" || context.approvalsAlwaysAllowedForSession)
+              ) {
                 return {
                   behavior: "allow",
                   updatedInput: toolInput,
@@ -6245,6 +6260,20 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               cause,
             }),
         }).pipe(
+          Effect.tap((runtime) =>
+            gatewaySessionLease?.connection.a2aPermissions
+              ? Effect.tryPromise({
+                  try: () => (runtime as Query).setMcpPermissionModeOverride("synara", "default"),
+                  catch: (cause) =>
+                    new ProviderAdapterProcessError({
+                      provider: PROVIDER,
+                      threadId,
+                      detail: "Failed to configure Synara MCP permission prompts.",
+                      cause,
+                    }),
+                })
+              : Effect.void,
+          ),
           Effect.tapError(() =>
             Effect.all([
               teardownFailedStartupProcess(threadId, processOwner).pipe(

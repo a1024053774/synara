@@ -21,6 +21,7 @@ export const SETTINGS_SECTION_IDS = [
   "skills",
   "usage",
   "integrations",
+  "role-permissions",
   "advanced",
 ] as const;
 
@@ -66,6 +67,14 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
 ] as const;
 
 export const SETTINGS_NAV_ITEMS: readonly SettingsNavItem[] = [
+  {
+    id: "role-permissions",
+    group: "personal",
+    label: "角色权限",
+    description: "调整 a2a 角色的能力与工具免确认，新签发凭据后生效。",
+    icon: "settings-slider-hor",
+    eyebrow: "a2a",
+  },
   {
     id: "general",
     group: "personal",

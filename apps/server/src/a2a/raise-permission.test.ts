@@ -34,7 +34,20 @@ function fixture(toolName = "a2a_raise") {
     enableComputerControl: false,
     activeInteractionMode: "default",
     autoApproveSynaraTools: false,
-    gatewaySessionLease: { release: vi.fn() } as { release: () => void } | undefined,
+    gatewaySessionLease: {
+      release: vi.fn(),
+      connection: { a2aPermissions: () => ({ role: "worker", autoApproveTools: null }) },
+    } as
+      | {
+          release: () => void;
+          connection: {
+            a2aPermissions: () =>
+              | { role: "worker"; autoApproveTools: readonly string[] | null }
+              | null
+              | undefined;
+          };
+        }
+      | undefined,
   };
   vi.spyOn(
     manager as unknown as { emitEvent: (...args: unknown[]) => void },
@@ -81,6 +94,52 @@ function fixture(toolName = "a2a_raise") {
   return { context, params, write, invoke };
 }
 afterEach(() => vi.restoreAllMocks());
+
+describe("T-064 customized native approvals", () => {
+  it.each(["approval-required", "full-access"])(
+    "allows only a checked disposition in %s",
+    async (mode) => {
+      const f = fixture("a2a_disposition");
+      f.context.session.runtimeMode = mode;
+      f.context.gatewaySessionLease!.connection.a2aPermissions = () => ({
+        role: "worker",
+        autoApproveTools: ["a2a_disposition"],
+      });
+      await f.invoke();
+      expect(f.write).toHaveBeenCalledExactlyOnceWith(f.context, {
+        id: 19,
+        result: { action: "accept", content: null, _meta: null },
+      });
+      expect(f.context.pendingApprovals.size).toBe(0);
+    },
+  );
+  it.each([
+    "unchecked",
+    "empty",
+    "ordinary",
+    "revoked",
+    "idle",
+    "stale-turn",
+    "retired",
+    "wrong-server",
+  ])("keeps custom policy interactive for %s", async (condition) => {
+    const f = fixture("a2a_raise");
+    f.context.autoApproveSynaraTools = true;
+    f.context.gatewaySessionLease!.connection.a2aPermissions = () =>
+      condition === "ordinary"
+        ? undefined
+        : condition === "revoked"
+          ? null
+          : { role: "worker", autoApproveTools: condition === "empty" ? [] : ["a2a_submit"] };
+    if (condition === "idle") f.context.session.status = "ready";
+    if (condition === "stale-turn") f.params.turnId = "stale";
+    if (condition === "retired") f.context.gatewayCredentialRetired = true;
+    if (condition === "wrong-server") f.params.serverName = "other";
+    await f.invoke();
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.context.pendingApprovals.size).toBe(1);
+  });
+});
 
 describe("a2a_raise native approval contract", () => {
   it("accepts an active full-access worker call once without persistence", async () => {

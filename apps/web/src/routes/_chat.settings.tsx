@@ -64,6 +64,7 @@ import {
 import { ProfileSettingsPanel } from "../components/settings/ProfileSettingsPanel";
 import { ProviderUsageSettingsPanel } from "../components/settings/ProviderUsageSettingsPanel";
 import { ExternalMcpSettingsPanel } from "../components/settings/ExternalMcpSettingsPanel";
+import { RolePermissionsSettingsPanel } from "../a2a/RolePermissionsSettingsPanel";
 import {
   SettingResetButton,
   SettingsSegmentedControl,
@@ -1683,7 +1684,7 @@ function SettingsRouteView() {
                   </div>
                   {activeSection === "shortcuts" ? (
                     <KeyboardShortcutsResetButton />
-                  ) : (
+                  ) : activeSection === "role-permissions" ? null : (
                     <Button
                       size="xs"
                       variant="outline"
@@ -1739,6 +1740,7 @@ function SettingsRouteView() {
                   resetEpoch={resetEpoch}
                 />
                 <ExternalMcpSettingsPanel active={activeSection === "integrations"} />
+                <RolePermissionsSettingsPanel active={activeSection === "role-permissions"} />
                 <AdvancedSettingsPanel
                   active={activeSection === "advanced"}
                   onOpenReleaseHistory={() => setReleaseHistoryOpen(true)}

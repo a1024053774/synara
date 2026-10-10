@@ -20,12 +20,18 @@ import {
   type A2AIssueRecord,
   type A2AIssueView,
   type A2AUserInput,
+  type A2ARolePermissionsRequest,
   ProjectId,
   ThreadId,
 } from "@synara/contracts";
 import { execProcessFile } from "@synara/shared/processRuntime";
 import { Schema } from "effect";
 import { A2AMembership } from "./membership";
+import {
+  ensureRolePermissionTables,
+  readRolePermissionSettings,
+  saveRolePermission,
+} from "./rolePermissions";
 
 const REF = "refs/a2a/integration";
 export class Refusal extends Error {
@@ -127,6 +133,7 @@ export class A2AGates {
       CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, task TEXT NOT NULL, attempt TEXT, type TEXT NOT NULL, details TEXT NOT NULL);
       CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;
       CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT,'append only'); END;`);
+    ensureRolePermissionTables(this.db);
     // T-055 registered one input per message. A reply bundle has one message
     // and several immutable inputs. Preserve every legacy row byte-for-byte
     // while removing only the obsolete message uniqueness constraint.
@@ -483,6 +490,12 @@ export class A2AGates {
     } finally {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
     }
+  }
+  rolePermissionSettings() {
+    return readRolePermissionSettings(this.db);
+  }
+  saveRolePermissionSettings(request: A2ARolePermissionsRequest) {
+    return saveRolePermission(this.db, request, (input) => this.saveUserInput(input), this.now());
   }
   private saveUserInput(input: A2AUserInput) {
     this.db.prepare("INSERT INTO user_inputs(id,task,message,data) VALUES (?,?,?,?)").run(

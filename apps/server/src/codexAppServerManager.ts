@@ -69,6 +69,7 @@ import {
   isSynaraGatewayToolName,
   shouldAllowSynaraComputerProviderTool,
 } from "./agentGateway/computerToolPermission.ts";
+import { a2aProviderPermission } from "./a2a/providerPermission";
 import {
   SYNARA_GATEWAY_HARNESS_POLICY,
   renderSynaraHarnessPolicy,
@@ -4498,6 +4499,16 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     const synaraToolName = isMcpToolCallApproval
       ? this.readSynaraMcpApprovalToolName(request.params)
       : undefined;
+    const a2aDecision =
+      this.readString(request.params, "serverName") === SYNARA_MCP_SERVER_NAME
+        ? a2aProviderPermission({
+            name: synaraToolName,
+            serverPinned: true,
+            permissions: context.gatewaySessionLease?.connection?.a2aPermissions?.(rawRoute.turnId),
+            activeTurn: activeSynaraToolTurn,
+            interactionMode: context.activeInteractionMode,
+          })
+        : undefined;
     if (
       isMcpToolCallApproval &&
       this.readString(request.params, "serverName") === SYNARA_MCP_SERVER_NAME &&
@@ -4506,9 +4517,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       !context.stopping &&
       context.activeInteractionMode === "default" &&
       ((activeSynaraToolTurn &&
-        (context.autoApproveSynaraTools === true ||
-          context.session.runtimeMode === "full-access") &&
-        isSynaraGatewayToolName(synaraToolName)) ||
+        (a2aDecision === "allow" ||
+          (a2aDecision === undefined &&
+            (context.autoApproveSynaraTools === true ||
+              context.session.runtimeMode === "full-access") &&
+            isSynaraGatewayToolName(synaraToolName)))) ||
         shouldAllowSynaraComputerProviderTool({
           computerControlEnabled: context.enableComputerControl === true,
           activeTurn: activeSynaraToolTurn,

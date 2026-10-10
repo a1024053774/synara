@@ -26,6 +26,10 @@ export interface AgentGatewayMcpConnection {
   readonly url: string;
   /** Bearer token bound to the calling thread. */
   readonly bearerToken: string;
+  /** Non-secret a2a policy for this exact live credential; a supplied turn also checks retirement. */
+  readonly a2aPermissions?: (
+    turnId?: string,
+  ) => AgentGatewaySessionIdentity["a2aPermissions"] | null;
 }
 
 export interface AgentGatewayStdioProxySpawn {

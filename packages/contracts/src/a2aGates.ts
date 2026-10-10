@@ -255,7 +255,7 @@ export interface A2AUserInput {
     request?: string | null;
     eventSequence?: number;
   };
-  channel: "thread-message" | "issue-panel" | "ws-rpc" | "ui-derived";
+  channel: "thread-message" | "issue-panel" | "ws-rpc" | "ui-derived" | "settings-page";
   reply_to: string | null;
   source_ref: {
     message_id?: string;
