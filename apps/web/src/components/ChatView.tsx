@@ -5433,7 +5433,7 @@ export default function ChatView({
       // both themes (chips float over the page), rounded on top only and flush against
       // the input shell below. No overlap/underlay tricks — in dark mode a slice tucked
       // behind the composer's translucent corners reads as a visible cut along the seam.
-      className="chat-composer-shell squircle mx-auto flex min-h-8 w-full min-w-0 flex-nowrap items-center gap-x-1.5 overflow-hidden !rounded-b-none !rounded-t-[var(--composer-radius)] px-1.5 py-1 transition-colors duration-150 ease-out motion-reduce:transition-none sm:min-h-7"
+      className="chat-composer-shell squircle mx-auto flex min-h-8 w-full min-w-0 flex-wrap items-center gap-1.5 overflow-hidden !rounded-b-none !rounded-t-[var(--composer-radius)] px-1.5 py-1 transition-colors duration-150 ease-out motion-reduce:transition-none sm:min-h-7"
     >
       {showContainerChatWorkspacePicker ? (
         <ProjectPicker
@@ -5485,7 +5485,7 @@ export default function ChatView({
       <div
         aria-hidden={showEmptyLandingBranchToolbar ? undefined : true}
         className={cn(
-          "flex min-w-0 flex-1 items-center transition-[opacity,transform] duration-150 ease-out motion-reduce:transition-none",
+          "flex min-w-fit flex-1 items-center transition-[opacity,transform] duration-150 ease-out motion-reduce:transition-none",
           showEmptyLandingBranchToolbar
             ? "translate-y-0 opacity-100"
             : "pointer-events-none opacity-0",
