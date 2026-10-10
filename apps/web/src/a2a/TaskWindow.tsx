@@ -351,13 +351,16 @@ export function TaskWindow() {
                         </header>
                         <IssuePanel task={task.taskId} thread={member.threadId} />
                         {thread && thread.projectId === task.projectId ? (
-                          <ChatView
-                            threadId={member.threadId}
-                            hideHeader
-                            paneScopeId={`a2a:${task.taskId}:${member.threadId}`}
-                            surfaceMode="split"
-                            isFocusedPane={isFocused}
-                          />
+                          // Keep room for the composer before the issue list takes its share.
+                          <div className="flex min-h-48 flex-1 flex-col">
+                            <ChatView
+                              threadId={member.threadId}
+                              hideHeader
+                              paneScopeId={`a2a:${task.taskId}:${member.threadId}`}
+                              surfaceMode="split"
+                              isFocusedPane={isFocused}
+                            />
+                          </div>
                         ) : (
                           <PanelStateMessage fill="flex">
                             会话不可用，请核对归属。

@@ -177,7 +177,7 @@ export function IssuePanel({ task, thread }: { task: string; thread?: string }) 
       aria-label={thread ? "问题上报" : "问题汇总"}
       data-a2a-issues={thread ?? task}
       style={{ maxHeight: "min(60dvh, 36rem)" }}
-      className="flex min-h-0 shrink-0 flex-col gap-2 border-b border-border bg-muted/20 px-3 py-3 text-ui"
+      className="flex min-h-0 shrink flex-col gap-2 border-b border-border bg-muted/20 px-3 py-3 text-ui"
     >
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
