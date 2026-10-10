@@ -387,7 +387,11 @@ export function a2aControllerTools(gates: A2AGates): ToolEntry[] {
           ...args,
           command: "stop",
         });
-        const result = yield* Effect.promise(() => gates.call(request, caller(context)));
+        // The required stop capability grants this tool's narrow authority.
+        // An additional operate capability must not shadow it in projection.
+        const result = yield* Effect.promise(() =>
+          gates.call(request, { ...caller(context), address: "ideation" }),
+        );
         return { ...mcpToolResultJson(result), ...(!result.ok ? { isError: true as const } : {}) };
       }).pipe(
         Effect.catchTag("SchemaError", (error) =>
