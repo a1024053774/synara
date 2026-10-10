@@ -1243,19 +1243,19 @@ export function SidebarActivityBellButton({
         ) : null}
       </TooltipTrigger>
       <TooltipPopup
-        side={onboardingVisible ? "right" : "bottom"}
-        align={onboardingVisible ? "start" : "center"}
+        side="bottom"
+        align={onboardingVisible ? "end" : "center"}
         sideOffset={onboardingVisible ? 8 : 4}
         className={cn(
           onboardingVisible &&
-            "max-w-64 border-[var(--color-text-accent)] bg-[var(--color-text-accent)] text-white shadow-lg",
+            "max-w-64 border-[var(--color-text-accent)] text-popover-foreground shadow-lg",
         )}
         viewportClassName={cn(onboardingVisible && "px-3 py-2.5")}
       >
         {onboardingVisible ? (
           <div className="text-left">
             <div className="text-ui leading-snug font-semibold">Activity</div>
-            <div className="mt-0.5 text-ui-sm leading-4 text-white/85">
+            <div className="mt-0.5 text-ui-sm leading-4">
               See running tasks, completed work, and anything that needs your attention.
             </div>
           </div>
