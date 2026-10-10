@@ -6453,27 +6453,29 @@ export default function ChatView({
             {shouldRenderChatPaneContent && isCenteredEmptyLanding ? (
               <div
                 className={cn(
-                  "chat-pane-enter flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain",
+                  "chat-pane-enter flex min-h-0 flex-1 flex-col",
                   CHAT_COLUMN_GUTTER_CLASS_NAME,
                 )}
               >
-                {/* A task panel can leave much less room than the window height suggests.
-                    Keep the promo, hero and composer in flow and scroll the landing when
-                    they no longer fit. With room to spare, the composer stays at the bottom. */}
-                <div className="flex flex-1 shrink-0 flex-col">
-                  <div className="flex shrink-0 justify-center px-6 pt-4">
-                    <ProjectImportLandingBanner className="w-full max-w-[520px]" />
+                {/* Reserve the composer first. Query the remaining hero space, so task
+                    panels, narrow columns and zoom collapse secondary content together. */}
+                <div className="flex min-h-0 flex-1 flex-col [container-name:empty-landing] [container-type:size]">
+                  <div className="flex shrink-0 justify-center px-6 pt-4 [@container_empty-landing_(height<380px)]:hidden [@container_empty-landing_(width<480px)]:hidden">
+                    <ProjectImportLandingBanner className="w-full max-w-[520px] [&_.truncate]:overflow-visible [&_.truncate]:text-clip [&_.truncate]:whitespace-normal" />
                   </div>
                   <div
                     className={cn(
-                      "flex grow shrink-0 flex-col items-center justify-center gap-4 px-6 py-6 text-center select-none",
+                      "flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-6 py-4 text-center select-none [@container_empty-landing_(height<160px)]:hidden [@container_empty-landing_(width<480px)_and_(height<240px)]:hidden",
                       CHAT_COLUMN_FRAME_CLASS_NAME,
                     )}
                   >
-                    <SynaraLogo aria-label="Synara logo" className="size-10 shrink-0" />
+                    <SynaraLogo
+                      aria-label="Synara logo"
+                      className="size-10 shrink-0 [@container_empty-landing_(height<240px)]:hidden"
+                    />
                     <h2
                       data-testid="empty-landing-heading"
-                      className="text-[26px] font-normal leading-[1.15] tracking-[-0.015em] text-foreground/95 sm:text-[30px]"
+                      className="w-full break-words text-[26px] font-normal leading-[1.15] tracking-[-0.015em] text-foreground/95 sm:text-[30px]"
                     >
                       {isEmptyChatLanding ? (
                         "What should we work on?"
