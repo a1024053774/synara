@@ -108,7 +108,7 @@ function RoleEditor({
               title="自定义免确认"
               description={
                 selection.autoApproveTools === null
-                  ? "沿用默认：a2a_raise / a2a_submit 依运行模式和已有授权免确认，其它 a2a 工具提示。"
+                  ? "沿用默认：由会话运行模式和已有授权处理。启用自定义后，可逐工具选择免确认。"
                   : "勾选的工具免确认，其它工具提示。取消能力会同时取消对应工具的免确认。"
               }
               control={

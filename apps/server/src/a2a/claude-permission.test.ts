@@ -18,7 +18,7 @@ import { makeClaudeAdapterLive } from "../provider/Layers/ClaudeAdapter";
 // unchecked tool inherits full-access or coordinator grant; idle/ordinary/
 // revoked identity auto-approved. Native transport is controlled; the real
 // adapter builds the policy and emits the actual request.opened event.
-it.each(["checked", "unchecked", "idle", "ordinary", "revoked"])(
+it.each(["checked", "unchecked", "idle", "ordinary", "revoked", "default", "default-auto"])(
   "Claude native policy: %s",
   async (condition) => {
     let options: Options | undefined;
@@ -34,7 +34,14 @@ it.each(["checked", "unchecked", "idle", "ordinary", "revoked"])(
       applyFlagSettings: async () => {},
       getContextUsage: async () => ({}) as never,
       supportedCommands: async () => [],
-      supportedModels: async () => [],
+      supportedModels: async () => [
+        {
+          value: "claude-sonnet-5",
+          displayName: "Controlled supported model",
+          description: "Native I/O fixture",
+          supportsAutoMode: true,
+        },
+      ],
       supportedAgents: async () => [],
       setMcpPermissionModeOverride: async (server: string, mode: string) => {
         overrides.push(server + ":" + mode);
@@ -59,7 +66,11 @@ it.each(["checked", "unchecked", "idle", "ordinary", "revoked"])(
               ? null
               : {
                   role: "executor" as const,
-                  autoApproveTools: condition === "unchecked" ? [] : ["a2a_disposition"],
+                  autoApproveTools: condition.startsWith("default")
+                    ? null
+                    : condition === "unchecked"
+                      ? []
+                      : ["a2a_disposition"],
                 },
       }),
       revokeSessionToken: () => {},
@@ -86,11 +97,19 @@ it.each(["checked", "unchecked", "idle", "ordinary", "revoked"])(
           const threadId = ThreadId.makeUnsafe("t064-native-" + condition);
           yield* adapter.startSession({
             threadId,
-            runtimeMode: "full-access",
+            runtimeMode: condition === "default-auto" ? "auto" : "full-access",
             autoApproveSynaraTools: true,
           });
           yield* Effect.addFinalizer(() => adapter.stopSession(threadId).pipe(Effect.orDie));
-          expect(overrides).toEqual(["synara:default"]);
+          expect(overrides).toEqual(
+            ["ordinary", "revoked", "default", "default-auto"].includes(condition)
+              ? []
+              : ["synara:default"],
+          );
+          if (condition === "default-auto") {
+            expect(options!.permissionMode).toBe("auto");
+            return;
+          }
           if (condition !== "idle")
             yield* adapter.sendTurn({ threadId, input: "controlled native turn", attachments: [] });
           const abort = new AbortController();
@@ -99,7 +118,7 @@ it.each(["checked", "unchecked", "idle", "ordinary", "revoked"])(
             { action: "close" },
             { signal: abort.signal, toolUseID: "t064-call", requestId: "t064-native-request" },
           );
-          if (condition === "checked") {
+          if (condition === "checked" || condition === "default") {
             const result = yield* Effect.promise(() => pending);
             expect(result?.behavior).toBe("allow");
           } else {

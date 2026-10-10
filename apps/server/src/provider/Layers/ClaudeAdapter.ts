@@ -6261,7 +6261,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             }),
         }).pipe(
           Effect.tap((runtime) =>
-            gatewaySessionLease?.connection.a2aPermissions
+            // Tighten only an explicitly customized a2a policy. Default and
+            // ordinary sessions retain the provider's mode and Auto classifier.
+            gatewaySessionLease?.connection.a2aPermissions?.()?.autoApproveTools != null
               ? Effect.tryPromise({
                   try: () => (runtime as Query).setMcpPermissionModeOverride("synara", "default"),
                   catch: (cause) =>
